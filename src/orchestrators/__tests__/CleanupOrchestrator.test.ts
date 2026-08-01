@@ -11,6 +11,7 @@ import {
   ContainerResource,
   ImageResource,
   BackupResult,
+  CleanupErrorDetail,
   Report
 } from '../../types';
 
@@ -64,11 +65,13 @@ class MockResourceScanner implements IResourceScanner {
     return false; // Mock as not in use
   }
 
-  async performCleanup(resources: Resource[]): Promise<{ removed: Resource[], skipped: Resource[], errors: any[] }> {
-    if (this.dryRun) {
-      return { removed: resources, skipped: [], errors: [] };
-    }
-    return { removed: resources, skipped: [], errors: [] };
+  async performCleanup(resources: Resource[]): Promise<{
+    removed: Resource[],
+    skipped: Resource[],
+    skipReasons: Map<string, string>,
+    errors: CleanupErrorDetail[]
+  }> {
+    return { removed: resources, skipped: [], skipReasons: new Map(), errors: [] };
   }
 
   isDryRun(): boolean {
@@ -150,7 +153,10 @@ class MockReporter implements IReporter {
   async saveSummary(): Promise<string> { return '/tmp/summary.txt'; }
   logOperationStart(): void {}
   logOperationComplete(): void {}
-  logResourceRemoval(): void {}
+  removalLogs: { name: string; dryRun: boolean }[] = [];
+  logResourceRemoval(resource: Resource, _success: boolean, _error?: string, dryRun = false): void {
+    this.removalLogs.push({ name: resource.name, dryRun });
+  }
   logResourceSkip(): void {}
   logBackupOperation(): void {}
   getLogger(): any {
@@ -427,9 +433,14 @@ describe('CleanupOrchestrator Integration Tests', () => {
       class ErrorResourceScanner extends MockResourceScanner {
         async performCleanup(resources: Resource[]) {
           return {
-            removed: [],
-            skipped: [],
-            errors: resources.map(r => ({ resource: r, error: 'Mock error' }))
+            removed: [] as Resource[],
+            skipped: [] as Resource[],
+            skipReasons: new Map<string, string>(),
+            errors: resources.map(r => ({
+              resource: r,
+              type: 'resource_in_use' as const,
+              error: 'Mock error'
+            }))
           };
         }
       }
@@ -597,6 +608,31 @@ describe('CleanupOrchestrator Integration Tests', () => {
       expect(report.details.removed.map(r => r.id)).toEqual(['new']);
     });
 
+    it('marks the removal log as would-remove during a dry-run', async () => {
+      // The log said "Removed network: x" on a dry-run that deleted nothing.
+      const resources: Resource[] = [
+        { id: 'n1', name: 'orphan-net', type: 'network', size: 0, tags: [] }
+      ];
+      const reporter = new MockReporter();
+      const config = makeConfig();
+      const orch = new CleanupOrchestrator(
+        new MockDockerClient(),
+        new MockResourceScanner(resources),
+        new MockBackupManager(),
+        reporter,
+        config
+      );
+
+      await orch.executeDryRun();
+      expect(reporter.removalLogs).toEqual([{ name: 'orphan-net', dryRun: true }]);
+
+      // makeConfig defaults to dry-run, so a real run has to say so.
+      reporter.removalLogs = [];
+      config.cleanup.dryRun = false;
+      await orch.executeCleanup();
+      expect(reporter.removalLogs).toEqual([{ name: 'orphan-net', dryRun: false }]);
+    });
+
     it('listUnused respects age filter, returning only age-eligible resources', async () => {
       const resources: Resource[] = [
         { id: 'old', name: 'old', type: 'image', size: 100, createdAt: new Date(now - 10 * 86_400_000), tags: [] },
@@ -611,7 +647,46 @@ describe('CleanupOrchestrator Integration Tests', () => {
       );
       const result = await orch.listUnused();
       // listUnused shares the same filter + sort pipeline as cleanup, so only 'old' should be returned.
-      expect(result.map(r => r.id)).toEqual(['old']);
+      expect(result.resources.map(r => r.id)).toEqual(['old']);
+      expect(result.skippedUnknownAge).toEqual([]);
+    });
+
+    it('listUnused surfaces unknown-age resources instead of dropping them', async () => {
+      // The `list` channel used to discard this set, so a filtered listing
+      // looked like there was nothing left to reclaim.
+      const resources: Resource[] = [
+        { id: 'old', name: 'old', type: 'image', size: 100, createdAt: new Date(now - 10 * 86_400_000), tags: [] },
+        { id: 'undated-vol', name: 'undated-vol', type: 'volume', size: 0, tags: [] }
+      ];
+      const orch = new CleanupOrchestrator(
+        new MockDockerClient(),
+        new MockResourceScanner(resources),
+        new MockBackupManager(),
+        new MockReporter(),
+        makeConfig('7d')
+      );
+
+      const result = await orch.listUnused();
+      expect(result.resources.map(r => r.id)).toEqual(['old']);
+      expect(result.skippedUnknownAge.map(r => r.id)).toEqual(['undated-vol']);
+    });
+
+    it('listUnused reports no unknown-age set when no age filter is active', async () => {
+      const resources: Resource[] = [
+        { id: 'undated-vol', name: 'undated-vol', type: 'volume', size: 0, tags: [] }
+      ];
+      const orch = new CleanupOrchestrator(
+        new MockDockerClient(),
+        new MockResourceScanner(resources),
+        new MockBackupManager(),
+        new MockReporter(),
+        makeConfig()
+      );
+
+      const result = await orch.listUnused();
+      // Without --older-than an undated resource is an ordinary candidate.
+      expect(result.resources.map(r => r.id)).toEqual(['undated-vol']);
+      expect(result.skippedUnknownAge).toEqual([]);
     });
   });
 });

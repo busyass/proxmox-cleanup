@@ -132,8 +132,7 @@ describe('DockerClient', () => {
           Name: 'bridge',
           Driver: 'bridge',
           Created: new Date().toISOString(),
-          Labels: {},
-          Containers: {}
+          Labels: {}
         }
       ];
 
@@ -161,7 +160,7 @@ describe('DockerClient', () => {
     it('populates createdAt for networks when the Engine reports Created', async () => {
       const created = '2020-01-01T00:00:00.000Z';
       mockDocker.listNetworks.mockResolvedValue([
-        { Id: 'net1', Name: 'mynet', Created: created, Driver: 'bridge', Labels: {}, Containers: {} }
+        { Id: 'net1', Name: 'mynet', Created: created, Driver: 'bridge', Labels: {} }
       ] as any);
 
       const result = await dockerClient.listNetworks();
@@ -171,12 +170,122 @@ describe('DockerClient', () => {
 
     it('leaves createdAt undefined for networks when Created is absent', async () => {
       mockDocker.listNetworks.mockResolvedValue([
-        { Id: 'net2', Name: 'mynet2', Driver: 'bridge', Labels: {}, Containers: {} }
+        { Id: 'net2', Name: 'mynet2', Driver: 'bridge', Labels: {} }
       ] as any);
 
       const result = await dockerClient.listNetworks();
 
       expect(result[0].createdAt).toBeUndefined();
+    });
+
+    // Engine contract C5: SizeRw is only populated when size=1 is requested.
+    // Without this assertion a refactor can silently drop the flag and every
+    // container reports 0 B again.
+    it('requests container sizes, or every container would report 0 B', async () => {
+      mockDocker.listContainers.mockResolvedValue([] as any);
+
+      await dockerClient.listContainers(true);
+
+      expect(mockDocker.listContainers).toHaveBeenCalledWith({ all: true, size: true });
+    });
+
+    // Engine contract C9: `all: true` would add intermediate layers, which
+    // always have descendants and so can never be removed.
+    it('does not ask for intermediate image layers', async () => {
+      mockDocker.listImages.mockResolvedValue([] as any);
+
+      await dockerClient.listImages();
+
+      expect(mockDocker.listImages).toHaveBeenCalledWith();
+    });
+
+    // Engine contract C1: the State enum has seven values, not three.
+    it('maps every Engine container state to a distinct status', async () => {
+      const states = ['created', 'running', 'paused', 'restarting', 'exited', 'removing', 'dead'];
+      mockDocker.listContainers.mockResolvedValue(states.map((State, i) => ({
+        Id: `c${i}`, Names: [`/${State}-svc`], State,
+        Created: Math.floor(Date.now() / 1000), ImageID: 'i1', Labels: {}, Mounts: []
+      })) as any);
+
+      const result = await dockerClient.listContainers(true);
+
+      expect(result.map(c => c.status)).toEqual(states);
+    });
+
+    it('maps an unrecognised container state to unknown', async () => {
+      mockDocker.listContainers.mockResolvedValue([{
+        Id: 'c1', Names: ['/future-svc'], State: 'hibernated',
+        Created: Math.floor(Date.now() / 1000), ImageID: 'i1', Labels: {}, Mounts: []
+      }] as any);
+
+      const result = await dockerClient.listContainers(true);
+
+      expect(result[0].status).toBe('unknown');
+    });
+
+    // Engine contract C2: attachment must come from the container side.
+    it('reads network attachment from the container, since the network list omits it', async () => {
+      mockDocker.listContainers.mockResolvedValue([{
+        Id: 'c1', Names: ['/web'], State: 'running',
+        Created: Math.floor(Date.now() / 1000), ImageID: 'i1', Labels: {}, Mounts: [],
+        NetworkSettings: { Networks: { myapp_default: {}, bridge: {} } }
+      }] as any);
+
+      const result = await dockerClient.listContainers(true);
+
+      expect(result[0].networks.sort()).toEqual(['bridge', 'myapp_default']);
+    });
+
+    it('tolerates a container with no NetworkSettings', async () => {
+      mockDocker.listContainers.mockResolvedValue([{
+        Id: 'c1', Names: ['/web'], State: 'exited',
+        Created: Math.floor(Date.now() / 1000), ImageID: 'i1', Labels: {}, Mounts: []
+      }] as any);
+
+      const result = await dockerClient.listContainers(true);
+
+      expect(result[0].networks).toEqual([]);
+    });
+
+    it('splits a registry-with-port image reference on the tag, not the port', async () => {
+      mockDocker.listImages.mockResolvedValue([{
+        Id: 'sha256:abc', RepoTags: ['registry.example.com:5000/team/svc:1.2.3'],
+        Size: 1, Created: Math.floor(Date.now() / 1000), Labels: {}
+      }] as any);
+
+      const result = await dockerClient.listImages();
+
+      expect(result[0].repository).toBe('registry.example.com:5000/team/svc');
+      expect(result[0].tag).toBe('1.2.3');
+    });
+
+    it('exposes labels as both key and key=value so tag: patterns can match either', async () => {
+      mockDocker.listContainers.mockResolvedValue([{
+        Id: 'c1', Names: ['/web'], State: 'exited',
+        Created: Math.floor(Date.now() / 1000), ImageID: 'i1', Mounts: [],
+        Labels: { env: 'production', backup: '' }
+      }] as any);
+
+      const result = await dockerClient.listContainers(true);
+
+      expect(result[0].tags).toContain('env');
+      // Keeping only the keys meant `-p tag:env=production` silently matched
+      // nothing and the resource the user meant to keep was removed.
+      expect(result[0].tags).toContain('env=production');
+      // A valueless label yields just the key, not a trailing "=".
+      expect(result[0].tags).toContain('backup');
+      expect(result[0].tags).not.toContain('backup=');
+    });
+
+    it('names an untagged image with a short id so a list of them is reviewable', async () => {
+      mockDocker.listImages.mockResolvedValue([{
+        Id: 'sha256:ec3f0931a6e6b6855d76b2d7b0be30e81860baccd891b2e243280bf1cd8ad710',
+        RepoTags: [], Size: 1, Created: Math.floor(Date.now() / 1000), Labels: {}
+      }] as any);
+
+      const result = await dockerClient.listImages();
+
+      expect(result[0].name).toBe('<none>:<none> (ec3f0931a6e6)');
     });
   });
 
@@ -195,7 +304,11 @@ describe('DockerClient', () => {
       await dockerClient.removeContainer('container1');
 
       expect(mockDocker.getContainer).toHaveBeenCalledWith('container1');
-      expect(mockContainer.remove).toHaveBeenCalledWith({ force: true });
+      // Deliberately NOT { force: true }. The Engine documents force as "if the
+      // container is running, kill it before removing it", which turned its 409
+      // safety refusal into a kill. The scan only ever hands us dormant
+      // containers, so force is unnecessary and 409 stays a real backstop.
+      expect(mockContainer.remove).toHaveBeenCalledWith();
     });
 
     it('should handle container not found error', async () => {
@@ -250,6 +363,41 @@ describe('DockerClient', () => {
 
       expect(mockDocker.getNetwork).toHaveBeenCalledWith('network1');
       expect(mockNetwork.remove).toHaveBeenCalled();
+    });
+
+    // Engine contract C3: networks alone report "in use" as 403, not 409.
+    // Unmapped, this surfaced to the user as the daemon's word "unexpected".
+    it('classifies a network 403 as still-in-use, not as an unexpected failure', async () => {
+      const mockNetwork = {
+        remove: jest.fn().mockRejectedValue({
+          statusCode: 403,
+          message: '(HTTP code 403) unexpected - network myapp_default has active endpoints '
+        })
+      };
+      mockDocker.getNetwork.mockReturnValue(mockNetwork as any);
+
+      await expect(dockerClient.removeNetwork('network1'))
+        .rejects.toThrow(/is still in use/);
+    });
+
+    it('carries the classified error type to the caller', async () => {
+      const mockVolume = {
+        remove: jest.fn().mockRejectedValue({ statusCode: 409 })
+      };
+      mockDocker.getVolume.mockReturnValue(mockVolume as any);
+
+      await expect(dockerClient.removeVolume('vol1'))
+        .rejects.toMatchObject({ type: 'resource_in_use' });
+    });
+
+    it('classifies a 404 as not-found and recoverable', async () => {
+      const mockImage = {
+        remove: jest.fn().mockRejectedValue({ statusCode: 404 })
+      };
+      mockDocker.getImage.mockReturnValue(mockImage as any);
+
+      await expect(dockerClient.removeImage('gone'))
+        .rejects.toMatchObject({ type: 'resource_not_found', recoverable: true });
     });
   });
 

@@ -10,11 +10,16 @@ import {
   IResourceScanner,
   IBackupManager,
   IReporter,
-  ICleanupOrchestrator
+  ICleanupOrchestrator,
+  UnusedResources
 } from '../interfaces';
 import { SizeCalculator } from '../utils/SizeCalculator';
 import { AgeFilter } from '../utils/AgeFilter';
 import { errorMessage } from '../utils/errors';
+
+/** Shown when the Engine reports no creation time. */
+const UNKNOWN_AGE_REASON =
+  'creation time unavailable from the Docker Engine — cannot apply --older-than';
 
 /**
  * Main orchestrator that coordinates the cleanup workflow
@@ -63,15 +68,8 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
 
       this.reporter.logOperationStart(mode, allResources.length);
 
-      const typeFiltered = this.filterResources(allResources);
-      let candidates = typeFiltered;
-      let unknownAge: Resource[] = [];
-      if (thresholdMs !== undefined) {
-        const { kept, skippedUnknownAge } = AgeFilter.filterOlderThan(typeFiltered, thresholdMs, Date.now());
-        candidates = kept;
-        unknownAge = skippedUnknownAge;
-      }
-      const sortedResources = SizeCalculator.sortResourcesBySize(candidates);
+      const { resources: sortedResources, skippedUnknownAge: unknownAge } =
+        this.selectCandidates(allResources, thresholdMs);
 
       if (this.config.cleanup.backupEnabled && !this.config.cleanup.dryRun) {
         await this.createBackup(sortedResources);
@@ -81,15 +79,10 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
 
       if (unknownAge.length > 0) {
         cleanupResult.skippedUnknownAge = unknownAge;
-        unknownAge.forEach(r =>
-          this.reporter.logResourceSkip(r, 'creation time unavailable from the Docker Engine — cannot apply --older-than')
-        );
+        unknownAge.forEach(r => this.reporter.logResourceSkip(r, UNKNOWN_AGE_REASON));
       }
 
-      // diskSpaceFreed is the sum of the sizes reported by the Docker API
-      // for the resources we actually removed. Networks and volumes often
-      // report 0 (Engine doesn't expose their size), so this is a lower
-      // bound rather than a precise filesystem delta.
+      // A lower bound: the Engine reports no size for volumes or networks.
       const diskSpaceFreed = SizeCalculator.calculateTotalSize(cleanupResult.removed);
       const executionTime = Date.now() - startTime;
 
@@ -187,20 +180,43 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
   }
 
   /**
-   * List unused resources without removing anything: scan, filter by the
-   * configured resource types, and sort largest-first. Shares the scan +
-   * filter + sort pipeline with executeCleanup so the `list` command can
-   * never drift from what cleanup would actually act on.
+   * Type filter, then age filter, then largest-first. The one place both
+   * `executeCleanup` and `listUnused` decide what counts as a candidate.
    */
-  async listUnused(): Promise<Resource[]> {
+  private selectCandidates(
+    allResources: Resource[],
+    thresholdMs: number | undefined
+  ): UnusedResources {
+    const typeFiltered = this.filterResources(allResources);
+
+    if (thresholdMs === undefined) {
+      return {
+        resources: SizeCalculator.sortResourcesBySize(typeFiltered),
+        skippedUnknownAge: []
+      };
+    }
+
+    const { kept, skippedUnknownAge } = AgeFilter.filterOlderThan(
+      typeFiltered,
+      thresholdMs,
+      Date.now()
+    );
+
+    return {
+      resources: SizeCalculator.sortResourcesBySize(kept),
+      skippedUnknownAge
+    };
+  }
+
+  /**
+   * List unused resources without removing anything. Returns the unknown-age
+   * set alongside the candidates so callers can surface that count too.
+   */
+  async listUnused(): Promise<UnusedResources> {
     const thresholdMs = this.minAgeMs();
     await this.connectToDocker();
     const allResources = await this.scanAll();
-    const filtered = this.filterResources(allResources);
-    const candidates = thresholdMs === undefined
-      ? filtered
-      : AgeFilter.filterOlderThan(filtered, thresholdMs, Date.now()).kept;
-    return SizeCalculator.sortResourcesBySize(candidates);
+    return this.selectCandidates(allResources, thresholdMs);
   }
 
   /**
@@ -241,22 +257,22 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     }
   }
 
-  /**
-   * Perform the actual cleanup or dry-run.
-   * The scanner fetches the container list once for the whole batch
-   * rather than re-listing per resource.
-   */
+  /** Run the cleanup or dry-run and log each outcome. */
   private async performCleanup(resources: Resource[]): Promise<CleanupResult> {
     const result = await this.resourceScanner.performCleanup(resources);
 
-    result.removed.forEach(r => this.reporter.logResourceRemoval(r, true));
-    result.skipped.forEach(r => this.reporter.logResourceSkip(r, 'Resource is in use'));
+    const isDryRun = this.config.cleanup.dryRun;
+    result.removed.forEach(r => this.reporter.logResourceRemoval(r, true, undefined, isDryRun));
+    result.skipped.forEach(r =>
+      this.reporter.logResourceSkip(r, result.skipReasons.get(r.id) ?? 'still in use')
+    );
 
+    // Keep the classification the client worked out.
     const errors: CleanupError[] = result.errors.map(e => ({
-      type: 'unknown',
+      type: e.type,
       message: e.error,
       timestamp: new Date(),
-      recoverable: false,
+      recoverable: e.type === 'network' || e.type === 'resource_not_found',
       resource: e.resource
     }));
     errors.forEach(e => {

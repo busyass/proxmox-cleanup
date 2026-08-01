@@ -43,7 +43,7 @@ export interface IReporter {
   /**
    * Log resource removal
    */
-  logResourceRemoval(resource: Resource, success: boolean, error?: string): void;
+  logResourceRemoval(resource: Resource, success: boolean, error?: string, dryRun?: boolean): void;
 
   /**
    * Log resource skip

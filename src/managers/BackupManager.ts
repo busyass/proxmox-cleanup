@@ -3,6 +3,13 @@ import * as path from 'path';
 import { Backup, BackupResult, Resource } from '../types';
 import { IBackupManager } from '../interfaces';
 import { errorMessage } from '../utils/errors';
+import { SizeCalculator } from '../utils/SizeCalculator';
+import { pruneOldest } from '../utils/retention';
+
+/** Default retained backups. */
+const DEFAULT_KEEP_BACKUPS = 30;
+
+const BACKUP_PREFIX = 'cleanup_';
 
 /**
  * Backup manager implementation
@@ -10,9 +17,19 @@ import { errorMessage } from '../utils/errors';
  */
 export class BackupManager implements IBackupManager {
   private backupDirectory: string;
+  private proxmoxHost: string;
+  private keepBackups: number;
+  /** Distinguishes backups within the same millisecond. */
+  private backupsWritten = 0;
 
-  constructor(backupDirectory: string = './backups') {
+  constructor(
+    backupDirectory: string = './backups',
+    proxmoxHost: string = '',
+    keepBackups: number = DEFAULT_KEEP_BACKUPS
+  ) {
     this.backupDirectory = backupDirectory;
+    this.proxmoxHost = proxmoxHost;
+    this.keepBackups = keepBackups;
   }
 
   /**
@@ -28,8 +45,9 @@ export class BackupManager implements IBackupManager {
         timestamp: new Date(),
         resources,
         metadata: {
-          proxmoxHost: process.env.PROXMOX_HOST || 'unknown',
-          totalSize: resources.reduce((sum, r) => sum + r.size, 0),
+          // PROXMOX_HOST kept as a fallback for anyone already using it.
+          proxmoxHost: this.proxmoxHost || process.env.PROXMOX_HOST || 'unknown',
+          totalSize: SizeCalculator.calculateTotalSize(resources),
           resourceCount: resources.length
         }
       };
@@ -40,6 +58,9 @@ export class BackupManager implements IBackupManager {
 
       // Save backup to file
       await this.saveBackup(backup, backupPath);
+
+      // Nothing else prunes these.
+      await pruneOldest(this.backupDirectory, BACKUP_PREFIX, this.keepBackups);
 
       return {
         success: true,
@@ -98,14 +119,15 @@ export class BackupManager implements IBackupManager {
   }
 
   /**
-   * Generate backup filename with timestamp
+   * Timestamped filename plus a sequence number, since two backups can land in
+   * the same millisecond and the second would otherwise overwrite the first.
    */
   private generateBackupFilename(): string {
     const timestamp = new Date()
       .toISOString()
       .replace(/[:.]/g, '-')
-      .replace('T', '_')
-      .split('.')[0]; // Remove milliseconds
-    return `cleanup_${timestamp}.backup.json`;
+      .replace('T', '_');
+    const sequence = String(++this.backupsWritten).padStart(3, '0');
+    return `${BACKUP_PREFIX}${timestamp}_${sequence}.backup.json`;
   }
 }

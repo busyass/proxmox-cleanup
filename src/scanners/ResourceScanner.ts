@@ -1,5 +1,6 @@
 import {
   ContainerResource,
+  ContainerStatus,
   ImageResource,
   VolumeResource,
   NetworkResource,
@@ -9,7 +10,31 @@ import {
 import { IResourceScanner } from '../interfaces';
 import { IDockerClient } from '../interfaces';
 import { ResourceFilter } from '../utils/ResourceFilter';
-import { errorMessage } from '../utils/errors';
+import { errorMessage, errorType } from '../utils/errors';
+
+/**
+ * States safe to remove: dormant and not mid-transition.
+ *
+ * An allow-list, not `!== 'running'`, so an unrecognised state fails safe
+ * rather than reading as removable.
+ */
+const REMOVABLE_CONTAINER_STATES: ReadonlySet<ContainerStatus> = new Set<ContainerStatus>([
+  'exited',
+  'created',
+  'dead'
+]);
+
+/** Docker's built-ins, never removable. */
+const DEFAULT_NETWORKS: ReadonlySet<string> = new Set(['bridge', 'host', 'none']);
+
+/** Reasons shown to the user when a container is left alone. */
+const LIVE_CONTAINER_REASONS: Partial<Record<ContainerStatus, string>> = {
+  running: 'container is running',
+  paused: 'container is paused — still live, resume or stop it first',
+  restarting: 'container is restarting — still live',
+  removing: 'container is already being removed by Docker',
+  unknown: 'container reported a state this version does not recognise'
+};
 
 /**
  * Resource scanner implementation
@@ -26,12 +51,10 @@ export class ResourceScanner implements IResourceScanner {
     this.dryRun = dryRun;
   }
 
-  /**
-   * Scan for unused containers (stopped or exited) that aren't protected.
-   */
+  /** Unused containers: dormant and not protected. */
   async scanContainers(): Promise<ContainerResource[]> {
     const containers = await this.dockerClient.listContainers(true);
-    const unused = containers.filter(c => c.status !== 'running');
+    const unused = containers.filter(c => REMOVABLE_CONTAINER_STATES.has(c.status));
     return this.resourceFilter.filterProtected(unused);
   }
 
@@ -65,12 +88,7 @@ export class ResourceScanner implements IResourceScanner {
       this.dockerClient.listVolumes()
     ]);
 
-    const mountedNames = new Set<string>();
-    for (const container of containers) {
-      for (const name of container.volumes) {
-        if (name) mountedNames.add(name);
-      }
-    }
+    const mountedNames = this.collectNames(containers, c => c.volumes);
 
     const volumesWithUsage = volumes
       .map(volume => ({
@@ -85,32 +103,61 @@ export class ResourceScanner implements IResourceScanner {
   }
 
   /**
-   * Scan for unused networks — no connected containers, excluding Docker's
-   * built-in `bridge`, `host`, and `none` networks.
+   * Unused networks: nothing attached, excluding Docker's built-ins.
+   * Attachment comes from the containers, since the network list omits it.
    */
   async scanNetworks(): Promise<NetworkResource[]> {
-    const allNetworks = await this.dockerClient.listNetworks();
-    const defaultNetworks = new Set(['bridge', 'host', 'none']);
+    const [allNetworks, containers] = await Promise.all([
+      this.dockerClient.listNetworks(),
+      this.dockerClient.listContainers(true)
+    ]);
 
-    const unusedNetworks = allNetworks.filter(network => {
-      return !defaultNetworks.has(network.name) && network.connectedContainers.length === 0;
-    });
+    const attachedNames = this.collectNames(containers, c => c.networks);
+
+    const unusedNetworks = allNetworks
+      .filter(network => !DEFAULT_NETWORKS.has(network.name) && !attachedNames.has(network.name))
+      .map(network => ({
+        ...network,
+        connectedContainers: this.containersOn(containers, network.name)
+      }));
 
     return this.resourceFilter.filterProtected(unusedNetworks);
   }
 
+  /** Non-empty names the containers reference, via `pick`. */
+  private collectNames(
+    containers: ContainerResource[],
+    pick: (container: ContainerResource) => string[]
+  ): Set<string> {
+    const names = new Set<string>();
+    for (const container of containers) {
+      for (const name of pick(container)) {
+        if (name) names.add(name);
+      }
+    }
+    return names;
+  }
+
+  /** Ids of the containers attached to a given network. */
+  private containersOn(containers: ContainerResource[], networkName: string): string[] {
+    return containers.filter(c => c.networks.includes(networkName)).map(c => c.id);
+  }
+
   /**
-   * Check if a resource is still in use. Fetches the current container list
-   * once and caches it on the instance for the duration of a single
-   * `performCleanup` call.
+   * Whether a resource is still in use, against a list fetched at cleanup time.
+   *
+   * Re-derives from `liveContainers` rather than the status captured during the
+   * scan, so it can catch something that changed in between.
    */
   async isResourceInUse(resource: Resource, containers?: ContainerResource[]): Promise<boolean> {
     const liveContainers = containers ?? await this.dockerClient.listContainers(true);
 
     switch (resource.type) {
     case 'container': {
-      const container = resource as ContainerResource;
-      return container.status === 'running';
+      const live = liveContainers.find(c => c.id === resource.id);
+      // Already gone: let the removal 404.
+      if (!live) return false;
+      return !REMOVABLE_CONTAINER_STATES.has(live.status);
     }
     case 'image': {
       const image = resource as ImageResource;
@@ -122,21 +169,37 @@ export class ResourceScanner implements IResourceScanner {
     }
     case 'network': {
       const network = resource as NetworkResource;
-      return network.connectedContainers.length > 0;
+      return liveContainers.some(c => c.networks.includes(network.name));
     }
     default:
       return false;
     }
   }
 
+  /** Why a resource was skipped, in the user's terms. */
+  skipReason(resource: Resource, containers: ContainerResource[]): string {
+    if (resource.type === 'container') {
+      const live = containers.find(c => c.id === resource.id);
+      if (live) {
+        return LIVE_CONTAINER_REASONS[live.status] ?? 'container is still in use';
+      }
+    }
+    return 'still in use';
+  }
+
   /**
-   * Perform cleanup operation with dry-run support.
-   * Fetches the container list once up-front and reuses it for every
-   * `isResourceInUse` check instead of re-listing per resource.
+   * Remove the given resources, or report what would go in dry-run.
+   * Fetches the container list once and reuses it for every in-use check.
    */
-  async performCleanup(resources: Resource[]): Promise<{ removed: Resource[]; skipped: Resource[]; errors: CleanupErrorDetail[] }> {
+  async performCleanup(resources: Resource[]): Promise<{
+    removed: Resource[];
+    skipped: Resource[];
+    skipReasons: Map<string, string>;
+    errors: CleanupErrorDetail[];
+  }> {
     const removed: Resource[] = [];
     const skipped: Resource[] = [];
+    const skipReasons = new Map<string, string>();
     const errors: CleanupErrorDetail[] = [];
 
     const containers = await this.dockerClient.listContainers(true);
@@ -145,6 +208,7 @@ export class ResourceScanner implements IResourceScanner {
       try {
         if (await this.isResourceInUse(resource, containers)) {
           skipped.push(resource);
+          skipReasons.set(resource.id, this.skipReason(resource, containers));
           continue;
         }
 
@@ -172,16 +236,18 @@ export class ResourceScanner implements IResourceScanner {
           break;
         default:
           skipped.push(resource);
+          skipReasons.set(resource.id, 'unrecognised resource type');
         }
       } catch (error) {
         errors.push({
           resource,
+          type: errorType(error),
           error: errorMessage(error)
         });
       }
     }
 
-    return { removed, skipped, errors };
+    return { removed, skipped, skipReasons, errors };
   }
 
   isDryRun(): boolean {

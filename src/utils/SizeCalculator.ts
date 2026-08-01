@@ -25,10 +25,26 @@ export class SizeCalculator {
   }
 
   /**
+   * Size for display. Volumes and networks arrive as 0 because the Engine
+   * reports none, and "0 B" would read as "empty" rather than "unknown".
+   */
+  static describeSize(resource: Resource): string {
+    if (SizeCalculator.hasKnownSize(resource)) {
+      return SizeCalculator.formatBytes(resource.size);
+    }
+    return resource.type === 'network' ? 'no size' : 'size unknown';
+  }
+
+  /** Whether the Engine reports a real size for this type. */
+  static hasKnownSize(resource: Resource): boolean {
+    return resource.type === 'container' || resource.type === 'image';
+  }
+
+  /**
    * Format bytes as a human-readable string (e.g. "1.2 GB").
    */
   static formatBytes(bytes: number): string {
-    if (bytes < 0 || bytes === 0) return '0 B';
+    if (bytes <= 0) return '0 B';
 
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];

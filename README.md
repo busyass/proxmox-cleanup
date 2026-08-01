@@ -6,7 +6,7 @@
 ![Proxmox](https://img.shields.io/badge/Proxmox-VE%208.x-E57000?style=for-the-badge&logo=proxmox&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5.9.3-blue?style=for-the-badge&logo=typescript&logoColor=white) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-24.x-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-1.4.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-2.0.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github)
@@ -26,7 +26,7 @@
 
 ## Why Proxmox Cleanup?
 
-Running Docker on a Proxmox host tends to leave behind unused containers, images, volumes, and networks — quietly eating disk space. Proxmox Cleanup finds and removes them, with a few safety nets: backups before anything is deleted, a dry-run you can preview first, protection patterns for the things you want to keep, and dependency checks so nothing in use gets touched.
+Running Docker on a Proxmox host tends to leave behind unused containers, images, volumes, and networks — quietly eating disk space. Proxmox Cleanup finds and removes them, with a few safety nets: a metadata manifest written before anything is deleted, a dry-run you can preview first, protection patterns for the things you want to keep, and dependency checks so nothing in use gets touched.
 
 One-line install, schedule it with cron, then forget about it.
 
@@ -55,15 +55,10 @@ git clone https://github.com/hiall-fyi/proxmox-cleanup.git
 cd proxmox-cleanup
 npm install
 npm run build
+npm install -g .          # optional: puts `proxmox-cleanup` on your PATH
 ```
-</details>
 
-<details>
-<summary>Global npm Install</summary>
-
-```bash
-npm install -g proxmox-cleanup
-```
+Without the last line, run it as `node dist/cli/index.js` from the clone.
 </details>
 
 ### 2. Configure
@@ -105,17 +100,21 @@ proxmox-cleanup cleanup -c /etc/proxmox-cleanup/config.json
 
 | Type | What Gets Cleaned |
 |------|-------------------|
-| containers | Stopped or exited containers |
+| containers | Containers that have exited, were created but never started, or are dead |
 | images | Images not used by any container |
 | volumes | Volumes not mounted by any container |
-| networks | Networks with no connected containers (excluding defaults) |
+| networks | Networks with no attached containers (excluding defaults) |
+
+Containers that are running, **paused**, restarting, or mid-removal are never
+touched. A paused container is a live workload, so it's left alone and reported
+as skipped with the reason.
 
 ### Safety Features
 
-- **Dependency Checking** — Containers using images, volumes mounted by containers, and networks with connections are all protected
+- **Dependency Checking** — Containers using images, volumes mounted by containers, and networks with attached containers are all protected
 - **Protected Resources** — System networks (bridge, host, none), resources matching protection patterns, tagged resources
-- **Backup System** — Automatic backup of resource metadata (names, IDs, sizes, dependencies) before cleanup
-- **Dry-Run Mode** — Preview all operations without making changes; identical results across multiple runs
+- **Backup Manifest** — Before deleting anything, resource metadata (names, IDs, sizes, dependencies) is written to a JSON file. It's a record for manual recovery, not a restore point: metadata can't bring back a volume's contents or an image's layers. A `restore` command that re-pulls images by name is planned.
+- **Dry-Run Mode** — Preview all operations without making changes. The report and the log both say "would remove", so a preview can't be mistaken for a completed cleanup
 
 ---
 
@@ -135,20 +134,31 @@ Create a `config.json` file (see `config.example.json`):
     "protectedPatterns": ["important-*", "system-*"],
     "backupEnabled": true,
     "backupPath": "./backups",
-    "minAge": "7d"
+    "minAge": "7d",
+    "keepBackups": 30
   },
   "reporting": {
     "verbose": true,
-    "logPath": "./logs"
+    "logPath": "./logs",
+    "keepReports": 30
   }
 }
 ```
 
-All configuration options can be overridden via CLI flags.
+All configuration options can be overridden via CLI flags. A flag only takes
+effect when you actually pass it, so settings in your config file are used
+otherwise.
+
+**File retention:** each run writes a report and a summary to the log directory,
+and each cleanup writes a backup manifest. `keepReports` and `keepBackups`
+(default 30 each) bound how many of these are kept — the oldest are deleted once
+the limit is passed. The log files themselves rotate separately.
 
 **Age filtering:** The optional `minAge` setting (or `--older-than` CLI flag) accepts a duration like `7d` (7 days), `12h` (12 hours), `30m` (30 minutes). Only resources older than this are removed — age is how long ago the resource was *created*, not last-used. Accepted units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `w` (weeks).
 
-**Volumes and creation time:** Docker volumes often report no creation time. When a resource's creation time is unavailable, `--older-than` skips it entirely and the report shows a separate count of these skipped resources. This keeps the tool safe by default — if the Engine can't tell you when a volume was created, the age filter won't guess.
+**Volumes and creation time:** Docker volumes often report no creation time. When a resource's creation time is unavailable, `--older-than` skips it entirely and `cleanup`, `dry-run`, and `list` all show a separate count of these skipped resources. This keeps the tool safe by default — if the Engine can't tell you when a volume was created, the age filter won't guess.
+
+**Volume and network sizes:** the Docker Engine doesn't report either, so they show as "size unknown" rather than `0 B`. A volume listed for cleanup may still hold a lot of data.
 
 ### Scheduling
 
@@ -182,10 +192,21 @@ systemctl enable --now proxmox-cleanup.timer
 
 Protect resources from cleanup using patterns:
 
-- **Wildcards**: `important-*`, `*-production`, `*-system-*`
+- **Wildcards**: `important-*`, `*-production`, `*-system-*` (matched against the name)
 - **Exact names**: `my-important-container`
-- **Tags**: Resources with specific tags
-- **IDs**: Exact resource IDs
+- **Labels**: `tag:backup` matches any resource carrying that label; `tag:env=production` matches the key and value
+- **IDs**: `id:ec3f0931a6e6` (the short ID `docker images` and `docker ps` print), or the full `sha256:…` digest. Prefixes shorter than 12 characters are rejected as ambiguous.
+
+**Untagged ("dangling") images:** these have no meaningful name, so a name pattern
+like `important-*` will never match one. To keep a specific dangling image, protect
+it by ID, by a label, or by a wildcard on its short ID (`*ec3f0931a6e6*`) — the
+short ID appears in how the tool displays it.
+
+Prefixes are lower-case and exact (`tag:`, `id:`). If a pattern can't possibly
+match anything — a misspelled prefix like `tags:`, an ID prefix too short to be
+unambiguous, or a prefix with nothing after it — the command stops and tells you
+which pattern is wrong instead of running with a protection list that does
+nothing.
 
 ---
 
@@ -204,7 +225,7 @@ Options:
   -p, --protect <patterns>         Protection patterns (wildcards supported)
   -b, --backup                     Create backup (default: true)
   --no-backup                      Disable backup
-  --backup-path <path>             Custom backup directory
+  --backup-path <path>             Custom backup directory (default: ./backups)
   -c, --config <path>              Configuration file path
   -v, --verbose                    Enable verbose logging
   --proxmox-host <host>            Proxmox host address
@@ -225,7 +246,7 @@ Options:
   -p, --protect <patterns>         Protection patterns (wildcards supported)
   -c, --config <path>              Path to configuration file
   -v, --verbose                    Enable verbose logging
-  --log-path <path>                Custom log directory path
+  --log-path <path>                Custom log directory path (default: ./logs)
   --proxmox-host <host>            Proxmox host address
   --proxmox-token <token>          Proxmox API token
   --older-than <duration>          Only remove resources older than this (e.g. 7d, 12h)
@@ -258,6 +279,17 @@ Options:
   -c, --config <path>              Path to configuration file
   --json                           Output JSON only (suppresses human-readable output)
 ```
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Everything the tool set out to do succeeded. Resources that were skipped (protected, still in use, or undatable) are a success, not a failure. |
+| 1 | The run couldn't proceed (Docker unreachable, bad config, invalid `--older-than`), or at least one resource failed to remove. Failures are itemised in the report. |
+
+If you pass `-c` with a path that doesn't exist, the command fails rather than
+falling back to defaults — otherwise a typo would run a cleanup with none of
+your protection patterns.
 
 ---
 
@@ -311,7 +343,7 @@ proxmox-cleanup/
 
 ### Testing
 
-Property-based testing with `fast-check` (100+ random inputs per property) covering resource identification, safe removal guarantees, backup completeness, size calculation accuracy, and report consistency. Plus unit tests for every component.
+192 tests. Property-based testing with `fast-check` (100+ random inputs per property) covering resource identification, safe removal guarantees, backup completeness, size calculation accuracy, and report consistency, alongside unit tests for the clients, scanner, orchestrator, reporter, and backup manager. All seven Docker container states are covered, and a state the tool doesn't recognise is treated as not removable.
 
 ```bash
 npm test              # Run the full suite
@@ -351,7 +383,9 @@ tail -f /var/log/proxmox-cleanup/cleanup.log
 ```
 </details>
 
-For other issues, use `--verbose` flag for detailed logging, check logs in the configured log directory, or [open an issue on GitHub](https://github.com/hiall-fyi/proxmox-cleanup/issues).
+For other issues, use the `--verbose` flag for detailed logging and check the logs in your configured log directory. Still stuck? [Open an issue](https://github.com/hiall-fyi/proxmox-cleanup/issues/new/choose) — the form asks for the few things that pin most problems down. For usage questions, [Discussions](https://github.com/hiall-fyi/proxmox-cleanup/discussions) is the better place.
+
+If something was removed that you wanted to keep, the report in your log directory lists exactly what went, and the backup manifest in your backup directory records its metadata. Both are worth attaching to the issue.
 
 ---
 
@@ -381,14 +415,6 @@ Contributions welcome!
 3. Commit changes (`git commit -m 'Add AmazingFeature'`)
 4. Push to branch (`git push origin feature/AmazingFeature`)
 5. Open a Pull Request
-
----
-
-<div align="center">
-
-[![Star History Chart](https://api.star-history.com/svg?repos=hiall-fyi/proxmox-cleanup&type=Date)](https://star-history.com/#hiall-fyi/proxmox-cleanup&Date)
-
-</div>
 
 ---
 

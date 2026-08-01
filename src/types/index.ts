@@ -15,11 +15,27 @@ export interface Resource {
   tags: string[];
 }
 
+/**
+ * Mirrors the Docker Engine's container `State` values, plus `unknown` for one
+ * this version doesn't recognise.
+ */
+export type ContainerStatus =
+  | 'created'
+  | 'running'
+  | 'paused'
+  | 'restarting'
+  | 'exited'
+  | 'removing'
+  | 'dead'
+  | 'unknown';
+
 export interface ContainerResource extends Resource {
   type: 'container';
-  status: 'running' | 'stopped' | 'exited';
+  status: ContainerStatus;
   imageId: string;
   volumes: string[];
+  /** Names of the networks this container is attached to. */
+  networks: string[];
 }
 
 export interface ImageResource extends Resource {
@@ -54,11 +70,15 @@ export interface CleanupOptions {
   backupEnabled: boolean;
   backupPath: string;
   minAge?: string;
+  /** Backup files to keep; older ones are pruned. */
+  keepBackups?: number;
 }
 
 export interface ReportingOptions {
   verbose: boolean;
   logPath: string;
+  /** Report/summary pairs to keep; older ones are pruned. */
+  keepReports?: number;
 }
 
 export interface CleanupConfig {
@@ -129,10 +149,9 @@ export interface Report {
   };
 }
 
-/**
- * Error detail for cleanup operations
- */
+/** A failed removal, with the classified reason. */
 export interface CleanupErrorDetail {
   resource: Resource;
+  type: ErrorType;
   error: string;
 }

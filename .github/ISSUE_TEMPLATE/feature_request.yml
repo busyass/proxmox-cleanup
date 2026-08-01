@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you write: this tool cleans up Docker resources on a
+        Proxmox host. It doesn't touch Proxmox itself, so LXC containers, VMs,
+        snapshots and Proxmox backups are out of scope. That's the honest scope
+        rather than a "no", and it's still worth logging if you think it belongs.
+  - type: checkboxes
+    attributes:
+      label: Before you start
+      options:
+        - label: I have searched the existing issues and discussions for this
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What are you trying to do that you can't do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: How you imagine it working, if you have a shape in mind.
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Existing workaround, if any

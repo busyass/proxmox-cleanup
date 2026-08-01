@@ -37,9 +37,15 @@ export interface IResourceScanner {
   isResourceInUse(resource: Resource, containers?: ContainerResource[]): Promise<boolean>;
 
   /**
-   * Perform cleanup operation with dry-run support
+   * Perform cleanup operation with dry-run support.
+   * `skipReasons` is keyed by resource id.
    */
-  performCleanup(resources: Resource[]): Promise<{ removed: Resource[]; skipped: Resource[]; errors: CleanupErrorDetail[] }>;
+  performCleanup(resources: Resource[]): Promise<{
+    removed: Resource[];
+    skipped: Resource[];
+    skipReasons: Map<string, string>;
+    errors: CleanupErrorDetail[];
+  }>;
 
   /**
    * Get dry-run status

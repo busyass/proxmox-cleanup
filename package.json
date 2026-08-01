@@ -1,6 +1,6 @@
 {
   "name": "proxmox-cleanup",
-  "version": "1.4.0",
+  "version": "2.0.0",
   "description": "Automated cleanup tool for unused Docker resources on Proxmox infrastructure",
   "main": "dist/index.js",
   "bin": {
@@ -21,6 +21,7 @@
     "test:coverage": "jest --coverage",
     "lint": "eslint src",
     "start": "node dist/cli/index.js",
+    "smoke": "node scripts/smoke-install.mjs",
     "prepack": "npm run build"
   },
   "keywords": [
@@ -32,7 +33,7 @@
   "author": "Joe Yiu",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.13.2",
+    "axios": "^1.19.0",
     "commander": "^11.1.0",
     "dockerode": "^5.0.0",
     "winston": "^3.19.0"

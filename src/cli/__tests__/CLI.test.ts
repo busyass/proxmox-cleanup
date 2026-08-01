@@ -38,8 +38,10 @@ describe('ProxmoxCleanupCLI', () => {
     console.log = jest.fn((...args) => consoleOutput.push(args.join(' ')));
     console.error = jest.fn((...args) => consoleErrors.push(args.join(' ')));
 
-    // Mock process.exit
+    // Mock process.exit. Production sets process.exitCode instead, so that is
+    // reset here too and asserted on directly.
     process.exit = jest.fn() as any;
+    process.exitCode = undefined;
 
     // Reset mocks
     jest.clearAllMocks();
@@ -53,6 +55,7 @@ describe('ProxmoxCleanupCLI', () => {
     // Restore original values
     process.argv = originalArgv;
     process.exit = originalExit;
+    process.exitCode = undefined;
     console.log = originalConsoleLog;
     console.error = originalConsoleError;
   });
@@ -265,6 +268,131 @@ describe('ProxmoxCleanupCLI', () => {
       expect(config.proxmox.token).toBe('custom-token');
     });
 
+    // The gap that let the path options stay broken for three releases: every
+    // existing test passed the flags, so nothing asserted what happens when a
+    // user relies on their config file alone. commander used to supply
+    // './backups' / './logs' as defaults, which always won.
+    describe('config values survive when the flag is absent', () => {
+      const installedConfig = {
+        proxmox: { host: 'pve.local', token: 'root@pam:secret' },
+        cleanup: {
+          dryRun: false,
+          resourceTypes: [],
+          protectedPatterns: ['production-*'],
+          backupEnabled: true,
+          backupPath: '/var/backups/proxmox-cleanup'
+        },
+        reporting: { verbose: true, logPath: '/var/log/proxmox-cleanup' }
+      };
+
+      beforeEach(() => {
+        mockFs.existsSync.mockReturnValue(true);
+        mockFs.readFileSync.mockReturnValue(JSON.stringify(installedConfig) as any);
+      });
+
+      it('keeps backupPath from the config file', async () => {
+        const config = await (cli as any).loadConfig({ config: '/etc/proxmox-cleanup/config.json' });
+        expect(config.cleanup.backupPath).toBe('/var/backups/proxmox-cleanup');
+      });
+
+      it('keeps logPath from the config file', async () => {
+        const config = await (cli as any).loadConfig({ config: '/etc/proxmox-cleanup/config.json' });
+        expect(config.reporting.logPath).toBe('/var/log/proxmox-cleanup');
+      });
+
+      it('keeps protectedPatterns and backupEnabled from the config file', async () => {
+        const config = await (cli as any).loadConfig({ config: '/etc/proxmox-cleanup/config.json' });
+        expect(config.cleanup.protectedPatterns).toEqual(['production-*']);
+        expect(config.cleanup.backupEnabled).toBe(true);
+      });
+
+      it('still lets an explicit flag win over the config file', async () => {
+        const config = await (cli as any).loadConfig({
+          config: '/etc/proxmox-cleanup/config.json',
+          backupPath: '/tmp/elsewhere',
+          logPath: '/tmp/logs'
+        });
+        expect(config.cleanup.backupPath).toBe('/tmp/elsewhere');
+        expect(config.reporting.logPath).toBe('/tmp/logs');
+      });
+
+      it('keeps resourceTypes from the config file', async () => {
+        mockFs.readFileSync.mockReturnValue(JSON.stringify({
+          ...installedConfig,
+          cleanup: { ...installedConfig.cleanup, resourceTypes: ['image'] }
+        }) as any);
+
+        // commander omits the key entirely when -t isn't passed, which is what
+        // lets the config value survive. A default of 'all' here would clear it.
+        const config = await (cli as any).loadConfig({ config: '/etc/proxmox-cleanup/config.json' });
+        expect(config.cleanup.resourceTypes).toEqual(['image']);
+      });
+
+      it('lets --types all widen a config that narrowed the set', async () => {
+        mockFs.readFileSync.mockReturnValue(JSON.stringify({
+          ...installedConfig,
+          cleanup: { ...installedConfig.cleanup, resourceTypes: ['image'] }
+        }) as any);
+
+        const config = await (cli as any).loadConfig({
+          config: '/etc/proxmox-cleanup/config.json',
+          types: 'all'
+        });
+        // Empty list means "no type filter", i.e. every type.
+        expect(config.cleanup.resourceTypes).toEqual([]);
+      });
+    });
+
+    it('refuses to run when a protection pattern cannot match anything', async () => {
+      // Proceeding would delete resources the user believes are protected.
+      await expect((cli as any).createOrchestrator({
+        proxmox: { host: '', token: '' },
+        cleanup: {
+          dryRun: true, resourceTypes: [], protectedPatterns: ['tags:env'],
+          backupEnabled: false, backupPath: './b'
+        },
+        reporting: { verbose: false, logPath: './l' }
+      }, {})).rejects.toThrow(/cannot match anything[\s\S]*did you mean "tag:"/);
+    });
+
+    it('runs normally when every protection pattern is usable', async () => {
+      await expect((cli as any).createOrchestrator({
+        proxmox: { host: '', token: '' },
+        cleanup: {
+          dryRun: true, resourceTypes: [], protectedPatterns: ['keep-*', 'tag:env=prod'],
+          backupEnabled: false, backupPath: './b'
+        },
+        reporting: { verbose: false, logPath: './l' }
+      }, {})).resolves.toBeDefined();
+    });
+
+    it('does not double-prefix the validate-config failure message', async () => {
+      // The command handler already prints "Config validation failed:", so
+      // wrapping the message again read as "Config validation failed:
+      // Configuration validation failed: ...".
+      mockFs.existsSync.mockReturnValue(false);
+
+      await expect((cli as any).validateConfig({ config: '/etc/nope.json' }))
+        .rejects.toThrow(/^Configuration file not found/);
+    });
+
+    it('refuses a --config path that does not exist rather than silently using defaults', async () => {
+      // Falling back would run a destructive command with none of the user's
+      // protection patterns.
+      mockFs.existsSync.mockReturnValue(false);
+
+      await expect((cli as any).loadConfig({ config: '/etc/typo/config.json' }))
+        .rejects.toThrow(/Configuration file not found/);
+    });
+
+    it('still uses built-in defaults when no --config is given', async () => {
+      mockFs.existsSync.mockReturnValue(false);
+
+      const config = await (cli as any).loadConfig({});
+      expect(config.cleanup.backupPath).toBe('./backups');
+      expect(config.reporting.logPath).toBe('./logs');
+    });
+
     it('should map --older-than to config.cleanup.minAge', async () => {
       const options = {
         olderThan: '14d'
@@ -372,7 +500,7 @@ describe('ProxmoxCleanupCLI', () => {
 
       await cli.run();
 
-      expect(process.exit).toHaveBeenCalledWith(1);
+      expect(process.exitCode).toBe(1);
       expect(consoleErrors).toContain('❌ Cleanup failed: Cleanup failed');
     });
 
@@ -384,7 +512,7 @@ describe('ProxmoxCleanupCLI', () => {
 
       await cli.run();
 
-      expect(process.exit).toHaveBeenCalledWith(1);
+      expect(process.exitCode).toBe(1);
       expect(consoleErrors).toContain('❌ Dry-run failed: Dry-run failed');
     });
 
@@ -396,7 +524,7 @@ describe('ProxmoxCleanupCLI', () => {
 
       await cli.run();
 
-      expect(process.exit).toHaveBeenCalledWith(1);
+      expect(process.exitCode).toBe(1);
       expect(consoleErrors).toContain('❌ List failed: List failed');
     });
 
@@ -408,7 +536,7 @@ describe('ProxmoxCleanupCLI', () => {
 
       await cli.run();
 
-      expect(process.exit).toHaveBeenCalledWith(1);
+      expect(process.exitCode).toBe(1);
       expect(consoleErrors).toContain('❌ Config validation failed: Config invalid');
     });
 
@@ -431,7 +559,9 @@ describe('ProxmoxCleanupCLI', () => {
       const resources = [
         { id: 'i1', name: 'img', type: 'image', size: 100, tags: [] }
       ];
-      CleanupOrchestrator.prototype.listUnused = jest.fn().mockResolvedValue(resources);
+      CleanupOrchestrator.prototype.listUnused = jest.fn().mockResolvedValue({
+        resources, skippedUnknownAge: []
+      });
 
       process.argv = ['node', 'cli.js', 'list', '--json'];
       cli = new ProxmoxCleanupCLI();
@@ -444,6 +574,22 @@ describe('ProxmoxCleanupCLI', () => {
       expect(parsed.summary.totalSize).toBe(100);
       expect(parsed.summary.byType.image).toEqual({ count: 1, size: 100 });
       expect(consoleOutput[0]).not.toMatch(/📋|🎉|💾/);
+    });
+
+    it('list --json surfaces the unknown-age set instead of dropping it', async () => {
+      const resources = [{ id: 'i1', name: 'img', type: 'image', size: 100, tags: [] }];
+      const undated = [{ id: 'v1', name: 'vol', type: 'volume', size: 0, tags: [] }];
+      CleanupOrchestrator.prototype.listUnused = jest.fn().mockResolvedValue({
+        resources, skippedUnknownAge: undated
+      });
+
+      process.argv = ['node', 'cli.js', 'list', '--json', '--older-than', '7d'];
+      cli = new ProxmoxCleanupCLI();
+      await cli.run();
+
+      const parsed = JSON.parse(consoleOutput[0]);
+      expect(parsed.skippedUnknownAge).toHaveLength(1);
+      expect(parsed.summary.skippedUnknownAgeCount).toBe(1);
     });
 
     it('dry-run --json emits the Report verbatim', async () => {
@@ -559,7 +705,7 @@ describe('ProxmoxCleanupCLI', () => {
 
       const parsed = JSON.parse(consoleOutput[consoleOutput.length - 1]);
       expect(parsed.error.message).toContain('Docker down');
-      expect(process.exit).toHaveBeenCalledWith(1);
+      expect(process.exitCode).toBe(1);
     });
   });
 
@@ -582,7 +728,7 @@ describe('ProxmoxCleanupCLI', () => {
         }
       };
 
-      (cli as any).displayReport(mockReport, false);
+      (cli as any).displayReport({ ...mockReport, mode: 'cleanup' });
 
       expect(consoleOutput.some(line => line.includes('CLEANUP REPORT'))).toBe(true);
       expect(consoleOutput.some(line => line.includes('Resources Scanned: 10'))).toBe(true);
@@ -609,12 +755,42 @@ describe('ProxmoxCleanupCLI', () => {
         }
       };
 
-      (cli as any).displayReport(mockReport, true);
+      (cli as any).displayReport({ ...mockReport, mode: 'dry-run' });
 
       expect(consoleOutput.some(line => line.includes('DRY-RUN REPORT'))).toBe(true);
       expect(consoleOutput.some(line => line.includes('Would Be Removed: 3'))).toBe(true);
-      expect(consoleOutput.some(line => line.includes('Resources Skipped: 1'))).toBe(true);
+      expect(consoleOutput.some(line => line.includes('Resources Skipped'))).toBe(true);
       expect(consoleOutput.some(line => line.includes('This was a dry-run'))).toBe(true);
+    });
+
+    // The display mode is derived from report.mode, never passed in. A caller
+    // used to hand displayReport a literal `false`, so `cleanup --dry-run`
+    // announced a completed cleanup after deleting nothing.
+    it('reads dry-run from the report, so it cannot contradict what ran', () => {
+      const dryRunReport = {
+        mode: 'dry-run' as const,
+        summary: { resourcesScanned: 1, resourcesRemoved: 1, diskSpaceFreed: 0, executionTime: 1 },
+        details: { removed: [], skipped: [], errors: [] }
+      };
+
+      (cli as any).displayReport(dryRunReport);
+
+      const output = consoleOutput.join('\n');
+      expect(output).toContain('DRY-RUN REPORT');
+      expect(output).toContain('This was a dry-run');
+      expect(output).not.toContain('Cleanup completed successfully');
+      expect(output).not.toContain('🧹 CLEANUP REPORT');
+    });
+
+    it('does not leave a double space in the freed-space line', () => {
+      (cli as any).displayReport({
+        mode: 'cleanup' as const,
+        summary: { resourcesScanned: 1, resourcesRemoved: 1, diskSpaceFreed: 1048576, executionTime: 1 },
+        details: { removed: [], skipped: [], errors: [] }
+      });
+
+      expect(consoleOutput.some(line => line.includes('Disk Space Freed:'))).toBe(true);
+      expect(consoleOutput.some(line => line.includes('Disk Space  Freed'))).toBe(false);
     });
 
     it('should display resource list correctly', () => {

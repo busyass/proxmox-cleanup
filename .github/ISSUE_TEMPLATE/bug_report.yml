@@ -1,0 +1,147 @@
+name: Bug report
+description: Something in Proxmox Cleanup isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. A few quick details up front
+        save a lot of back-and-forth. If it's about something being removed that
+        shouldn't have been, the output of `list` or `dry-run` is the single most
+        useful thing you can include.
+  - type: checkboxes
+    attributes:
+      label: Before you start
+      options:
+        - label: I have searched the existing issues and discussions for this
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: Proxmox Cleanup version
+      description: Run `proxmox-cleanup --version` rather than typing from memory.
+      placeholder: e.g. 2.0.0
+    validations:
+      required: true
+  - type: input
+    id: docker_version
+    attributes:
+      label: Docker version
+      description: From `docker --version`.
+      placeholder: e.g. 27.3.1
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Where is it running?
+      description: Proxmox version, or the OS if it isn't on Proxmox.
+      placeholder: e.g. Proxmox VE 8.2, or Debian 12 VM
+    validations:
+      required: true
+  - type: dropdown
+    id: install_type
+    attributes:
+      label: How did you install it?
+      options:
+        - Install script (curl | bash)
+        - From source (git clone)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: how_run
+    attributes:
+      label: How were you running it when this happened?
+      description: The systemd path behaves differently from a shell, so this narrows things down fast.
+      options:
+        - By hand in a shell
+        - systemd unit or timer
+        - cron
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The exact command you ran
+      description: Including flags. If you passed `-c`, say so — settings in a config file and settings on the command line interact.
+      placeholder: proxmox-cleanup cleanup -c /etc/proxmox-cleanup/config.json --older-than 7d
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: Paste the output if you still have it.
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **Was something removed that shouldn't have been?** Please include your
+        config file with the Proxmox token redacted, and the report from
+        `/var/log/proxmox-cleanup/` for that run. The backup manifest in
+        `/var/backups/proxmox-cleanup/` records what was deleted and is worth
+        attaching too.
+  - type: textarea
+    id: config
+    attributes:
+      label: Your config file
+      description: >
+        Redact the Proxmox token before pasting. Protection patterns and
+        `resourceTypes` are the parts that usually matter.
+      render: json
+  - type: textarea
+    id: output
+    attributes:
+      label: Output from `list` or `dry-run`
+      description: >
+        `proxmox-cleanup dry-run -c <your config>` shows what the tool thinks is
+        unused without touching anything. Its output pins most issues down
+        immediately.
+      render: text
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log lines
+      description: >
+        From your configured log directory, `/var/log/proxmox-cleanup/cleanup.log`
+        on a script install. Paste the lines around the problem.
+      render: text
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce (if you can)
+  - type: textarea
+    id: already_tried
+    attributes:
+      label: What have you already tried?
+      placeholder: e.g. ran dry-run first, adjusted protection patterns, reinstalled
+  - type: checkboxes
+    attributes:
+      label: Which resource types were involved?
+      description: Optional, helps rule things in or out.
+      options:
+        - label: Containers
+        - label: Images
+        - label: Volumes
+        - label: Networks
+  - type: checkboxes
+    attributes:
+      label: Which options are you using?
+      description: Optional.
+      options:
+        - label: Protection patterns (`-p` or `protectedPatterns`)
+        - label: Age filter (`--older-than` or `minAge`)
+        - label: Type filter (`--types` or `resourceTypes`)
+        - label: JSON output (`--json`)
+        - label: Backups disabled (`--no-backup`)
+        - label: Proxmox host configured

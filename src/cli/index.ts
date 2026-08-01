@@ -9,6 +9,7 @@ import { Reporter } from '../reporters/Reporter';
 import { ProxmoxClient } from '../clients/ProxmoxClient';
 import { CleanupConfig, ResourceType, Resource, Report, CleanupError } from '../types';
 import { SizeCalculator } from '../utils/SizeCalculator';
+import { ResourceFilter } from '../utils/ResourceFilter';
 import { errorMessage } from '../utils/errors';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -75,14 +76,14 @@ class ProxmoxCleanupCLI {
       .command('cleanup')
       .description('Execute cleanup of unused Docker resources')
       .option('-d, --dry-run', 'Preview what would be removed without actually removing anything')
-      .option('-t, --types <types>', 'Comma-separated list of resource types to clean (containers,images,volumes,networks)', 'all')
+      .option('-t, --types <types>', 'Resource types to clean: containers,images,volumes,networks, or all (default: all)')
       .option('-p, --protect <patterns>', 'Comma-separated list of protection patterns (wildcards supported)', '')
       .option('-b, --backup', 'Create backup before cleanup (enabled by default)')
       .option('--no-backup', 'Disable backup creation')
-      .option('--backup-path <path>', 'Custom backup directory path', './backups')
+      .option('--backup-path <path>', 'Custom backup directory path (default: ./backups)')
       .option('-c, --config <path>', 'Path to configuration file')
       .option('-v, --verbose', 'Enable verbose logging')
-      .option('--log-path <path>', 'Custom log directory path', './logs')
+      .option('--log-path <path>', 'Custom log directory path (default: ./logs)')
       .option('--proxmox-host <host>', 'Proxmox host address')
       .option('--proxmox-token <token>', 'Proxmox API token (format: user@realm:password)')
       .option('--older-than <duration>', 'Only act on resources created before now minus this duration (e.g. 7d, 12h)')
@@ -96,7 +97,7 @@ class ProxmoxCleanupCLI {
           } else {
             console.error('❌ Cleanup failed:', errorMessage(error));
           }
-          process.exit(1);
+          process.exitCode = 1;
         }
       });
 
@@ -104,11 +105,11 @@ class ProxmoxCleanupCLI {
     this.program
       .command('dry-run')
       .description('Preview what would be removed without actually removing anything')
-      .option('-t, --types <types>', 'Comma-separated list of resource types to scan (containers,images,volumes,networks)', 'all')
+      .option('-t, --types <types>', 'Resource types to scan: containers,images,volumes,networks, or all (default: all)')
       .option('-p, --protect <patterns>', 'Comma-separated list of protection patterns (wildcards supported)', '')
       .option('-c, --config <path>', 'Path to configuration file')
       .option('-v, --verbose', 'Enable verbose logging')
-      .option('--log-path <path>', 'Custom log directory path', './logs')
+      .option('--log-path <path>', 'Custom log directory path (default: ./logs)')
       .option('--proxmox-host <host>', 'Proxmox host address')
       .option('--proxmox-token <token>', 'Proxmox API token (format: user@realm:password)')
       .option('--older-than <duration>', 'Only act on resources created before now minus this duration (e.g. 7d, 12h)')
@@ -122,7 +123,7 @@ class ProxmoxCleanupCLI {
           } else {
             console.error('❌ Dry-run failed:', errorMessage(error));
           }
-          process.exit(1);
+          process.exitCode = 1;
         }
       });
 
@@ -130,7 +131,7 @@ class ProxmoxCleanupCLI {
     this.program
       .command('list')
       .description('List unused Docker resources without removing them')
-      .option('-t, --types <types>', 'Comma-separated list of resource types to list (containers,images,volumes,networks)', 'all')
+      .option('-t, --types <types>', 'Resource types to list: containers,images,volumes,networks, or all (default: all)')
       .option('-p, --protect <patterns>', 'Comma-separated list of protection patterns (wildcards supported)', '')
       .option('-c, --config <path>', 'Path to configuration file')
       .option('--older-than <duration>', 'Only act on resources created before now minus this duration (e.g. 7d, 12h)')
@@ -144,7 +145,7 @@ class ProxmoxCleanupCLI {
           } else {
             console.error('❌ List failed:', errorMessage(error));
           }
-          process.exit(1);
+          process.exitCode = 1;
         }
       });
 
@@ -163,7 +164,7 @@ class ProxmoxCleanupCLI {
           } else {
             console.error('❌ Config validation failed:', errorMessage(error));
           }
-          process.exit(1);
+          process.exitCode = 1;
         }
       });
   }
@@ -191,11 +192,12 @@ class ProxmoxCleanupCLI {
     if (options.json) {
       this.emitJson(report);
     } else {
-      this.displayReport(report, false);
+      this.displayReport(report);
     }
 
     if (report.details.errors.length > 0) {
-      process.exit(1);
+      // exitCode, not exit(): exit() would truncate buffered --json output.
+      process.exitCode = 1;
     }
   }
 
@@ -215,7 +217,7 @@ class ProxmoxCleanupCLI {
     if (options.json) {
       this.emitJson(report);
     } else {
-      this.displayReport(report, true);
+      this.displayReport(report);
     }
   }
 
@@ -230,9 +232,8 @@ class ProxmoxCleanupCLI {
     const config = await this.loadConfig(options);
     const orchestrator = await this.createOrchestrator(config, options);
 
-    // Shares the scan → type-filter → sort pipeline with cleanup, so the
-    // listing can never diverge from what a cleanup would actually act on.
-    const resources = await orchestrator.listUnused();
+    // Same pipeline as cleanup, so the listing cannot diverge from it.
+    const { resources, skippedUnknownAge } = await orchestrator.listUnused();
 
     if (options.json) {
       const byType = resources.reduce<Record<string, { count: number; size: number }>>((acc, r) => {
@@ -243,16 +244,18 @@ class ProxmoxCleanupCLI {
       }, {});
       this.emitJson({
         resources,
+        skippedUnknownAge,
         summary: {
           count: resources.length,
-          totalSize: resources.reduce((s, r) => s + r.size, 0),
+          totalSize: SizeCalculator.calculateTotalSize(resources),
+          skippedUnknownAgeCount: skippedUnknownAge.length,
           byType
         }
       });
       return;
     }
 
-    this.displayResourceList(resources);
+    this.displayResourceList(resources, skippedUnknownAge);
   }
 
   /**
@@ -308,7 +311,9 @@ class ProxmoxCleanupCLI {
       }
 
     } catch (error) {
-      throw new Error(`Configuration validation failed: ${errorMessage(error)}`);
+      // Re-thrown as-is: the command handler prefixes the message and emits the
+      // JSON error, so wrapping here only duplicated the prefix.
+      throw error;
     }
   }
 
@@ -318,8 +323,15 @@ class ProxmoxCleanupCLI {
   private async loadConfig(options: CliOptions): Promise<CleanupConfig> {
     let config: CleanupConfig;
 
-    // Load from config file if specified
-    if (options.config && fs.existsSync(options.config)) {
+    if (options.config) {
+      // A named file that isn't there is a mistake, not a request for defaults:
+      // falling back would run with none of the user's protection patterns.
+      if (!fs.existsSync(options.config)) {
+        throw new Error(
+          `Configuration file not found: ${options.config}. ` +
+          'Check the path, or omit --config to use built-in defaults.'
+        );
+      }
       const configContent = fs.readFileSync(options.config, 'utf8');
       config = JSON.parse(configContent);
     } else {
@@ -365,8 +377,8 @@ class ProxmoxCleanupCLI {
       config.cleanup.dryRun = true;
     }
 
-    // Resource types
-    if (options.types && options.types !== 'all') {
+    // `all` is explicit: it widens a config that narrowed the set.
+    if (options.types) {
       config.cleanup.resourceTypes = this.parseResourceTypes(options.types);
     }
 
@@ -406,9 +418,30 @@ class ProxmoxCleanupCLI {
   }
 
   /**
+   * Refuse to run on a pattern that cannot match: the user asked for a safety
+   * net and would otherwise get none, silently.
+   */
+  private assertProtectionPatternsUsable(patterns: string[]): void {
+    const problems = new ResourceFilter(patterns).findProblems();
+    if (problems.length === 0) return;
+
+    const detail = problems
+      .map(({ pattern, reason }) => `  "${pattern}" — ${reason}`)
+      .join('\n');
+
+    throw new Error(
+      `These protection patterns cannot match anything:\n${detail}\n` +
+      'Fix or remove them before running, so nothing is deleted that you meant to keep.'
+    );
+  }
+
+  /**
    * Parse resource types from string
    */
   private parseResourceTypes(typesString: string): ResourceType[] {
+    // Empty means no type filter.
+    if (typesString.trim().toLowerCase() === 'all') return [];
+
     const typeMapping: Record<string, ResourceType> = {
       'container': 'container',
       'containers': 'container',
@@ -439,6 +472,8 @@ class ProxmoxCleanupCLI {
    * Create orchestrator with all dependencies
    */
   private async createOrchestrator(config: CleanupConfig, options: CliOptions): Promise<CleanupOrchestrator> {
+    this.assertProtectionPatternsUsable(config.cleanup.protectedPatterns);
+
     // Create Docker client
     const dockerClient = new DockerClient();
     await dockerClient.connect();
@@ -448,10 +483,18 @@ class ProxmoxCleanupCLI {
     resourceScanner.setDryRun(config.cleanup.dryRun);
 
     // Create backup manager
-    const backupManager = new BackupManager(config.cleanup.backupPath);
+    const backupManager = new BackupManager(
+      config.cleanup.backupPath,
+      config.proxmox.host,
+      config.cleanup.keepBackups
+    );
 
     // Create reporter
-    const reporter = new Reporter(config.reporting.logPath, options.json === true);
+    const reporter = new Reporter(
+      config.reporting.logPath,
+      options.json === true,
+      config.reporting.keepReports
+    );
 
     return new CleanupOrchestrator(
       dockerClient,
@@ -465,7 +508,9 @@ class ProxmoxCleanupCLI {
   /**
    * Display cleanup report
    */
-  private displayReport(report: Report, isDryRun: boolean): void {
+  private displayReport(report: Report): void {
+    // From the report, so no caller can contradict what actually ran.
+    const isDryRun = report.mode === 'dry-run';
     const mode = isDryRun ? 'DRY-RUN' : 'CLEANUP';
     const emoji = isDryRun ? '🔍' : '🧹';
 
@@ -474,11 +519,11 @@ class ProxmoxCleanupCLI {
 
     console.log(`📊 Resources Scanned: ${report.summary.resourcesScanned}`);
     console.log(`${isDryRun ? '📋' : '🗑️'} Resources${isDryRun ? ' Would Be' : ''} Removed: ${report.summary.resourcesRemoved}`);
-    console.log(`💾 Disk Space ${isDryRun ? 'Would Be' : ''} Freed: ${SizeCalculator.formatBytes(report.summary.diskSpaceFreed)}`);
+    console.log(`💾 Disk Space ${isDryRun ? 'Would Be ' : ''}Freed: ${SizeCalculator.formatBytes(report.summary.diskSpaceFreed)}`);
     console.log(`⏱️ Execution Time: ${report.summary.executionTime}ms`);
 
     if (report.details.skipped.length > 0) {
-      console.log(`⏭️ Resources Skipped: ${report.details.skipped.length}`);
+      console.log(`⏭️ Resources Skipped (still in use or protected): ${report.details.skipped.length}`);
     }
 
     if (report.details.skippedUnknownAge && report.details.skippedUnknownAge.length > 0) {
@@ -498,7 +543,7 @@ class ProxmoxCleanupCLI {
         console.log(`\n📋 ${isDryRun ? 'Resources to be removed:' : 'Removed resources:'}`);
         report.details.removed.forEach((resource: Resource) => {
           const icon = this.getResourceIcon(resource.type);
-          console.log(`   ${icon} ${resource.name} (${resource.type}) - ${SizeCalculator.formatBytes(resource.size)}`);
+          console.log(`   ${icon} ${resource.name} (${resource.type}) - ${SizeCalculator.describeSize(resource)}`);
         });
       }
     }
@@ -516,13 +561,14 @@ class ProxmoxCleanupCLI {
   /**
    * Display resource list
    */
-  private displayResourceList(resources: Resource[]): void {
+  private displayResourceList(resources: Resource[], skippedUnknownAge: Resource[] = []): void {
     if (resources.length === 0) {
       console.log('🎉 No unused resources found!');
+      this.displayUnknownAgeNote(skippedUnknownAge);
       return;
     }
 
-    console.log(`📋 Found ${resources.length} unused resources:\n`);
+    console.log(`📋 Found ${resources.length} unused ${this.plural(resources.length, 'resource')}:\n`);
 
     // Group by type
     const grouped = resources.reduce<Record<string, Resource[]>>((acc, resource) => {
@@ -536,19 +582,40 @@ class ProxmoxCleanupCLI {
     // Display each type
     Object.entries(grouped).forEach(([type, typeResources]) => {
       const icon = this.getResourceIcon(type);
-      const totalSize = typeResources.reduce((sum: number, r: Resource) => sum + r.size, 0);
+      const count = typeResources.length;
+      const sizeLabel = SizeCalculator.hasKnownSize(typeResources[0])
+        ? SizeCalculator.formatBytes(SizeCalculator.calculateTotalSize(typeResources))
+        : SizeCalculator.describeSize(typeResources[0]);
 
-      console.log(`${icon} ${type.toUpperCase()} (${typeResources.length} items, ${SizeCalculator.formatBytes(totalSize)})`);
+      console.log(`${icon} ${type.toUpperCase()} (${count} ${this.plural(count, 'item')}, ${sizeLabel})`);
 
       typeResources.forEach((resource: Resource) => {
-        console.log(`   • ${resource.name} - ${SizeCalculator.formatBytes(resource.size)}`);
+        console.log(`   • ${resource.name} - ${SizeCalculator.describeSize(resource)}`);
       });
 
       console.log('');
     });
 
-    const totalSize = resources.reduce((sum, r) => sum + r.size, 0);
+    const totalSize = SizeCalculator.calculateTotalSize(resources);
     console.log(`💾 Total reclaimable space: ${SizeCalculator.formatBytes(totalSize)}`);
+    if (resources.some(r => !SizeCalculator.hasKnownSize(r))) {
+      console.log('   (volume and network sizes aren\'t reported by the Docker Engine)');
+    }
+    this.displayUnknownAgeNote(skippedUnknownAge);
+  }
+
+  /** Report resources the age filter couldn't judge, rather than dropping them. */
+  private displayUnknownAgeNote(skippedUnknownAge: Resource[]): void {
+    if (skippedUnknownAge.length === 0) return;
+    console.log(
+      `\n🕓 ${skippedUnknownAge.length} ${this.plural(skippedUnknownAge.length, 'resource')} ` +
+      'skipped: no creation time from Docker, so --older-than could not be applied'
+    );
+  }
+
+  /** Pluralise for a count. */
+  private plural(count: number, noun: string): string {
+    return count === 1 ? noun : `${noun}s`;
   }
 
   /**
@@ -589,13 +656,23 @@ class ProxmoxCleanupCLI {
   }
 }
 
-// Run CLI if this file is executed directly
-if (require.main === module) {
+/**
+ * Entry point. Exported so `bin/proxmox-cleanup` can call it explicitly: the
+ * shim loads this module with `require`, which makes `require.main` the shim
+ * rather than this file, so a `require.main === module` guard never fires and
+ * every command silently did nothing.
+ */
+function main(): void {
   const cli = new ProxmoxCleanupCLI();
   cli.run().catch(error => {
     console.error('❌ CLI Error:', errorMessage(error));
-    process.exit(1);
+    process.exitCode = 1;
   });
 }
 
-export { ProxmoxCleanupCLI };
+// Also run when executed directly (node dist/cli/index.js).
+if (require.main === module) {
+  main();
+}
+
+export { ProxmoxCleanupCLI, main };

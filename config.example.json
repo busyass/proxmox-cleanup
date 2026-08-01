@@ -12,10 +12,12 @@
       "production-*"
     ],
     "backupEnabled": true,
-    "backupPath": "./backups"
+    "backupPath": "./backups",
+    "keepBackups": 30
   },
   "reporting": {
     "verbose": true,
-    "logPath": "./logs"
+    "logPath": "./logs",
+    "keepReports": 30
   }
 }

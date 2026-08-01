@@ -2,9 +2,16 @@ import { Resource, CleanupResult, Report } from '../types';
 import { SizeCalculator } from '../utils/SizeCalculator';
 import { errorMessage } from '../utils/errors';
 import { isoSlug } from '../utils/time';
+import { pruneOldest } from '../utils/retention';
 import * as fs from 'fs';
 import * as path from 'path';
 import winston from 'winston';
+
+/** Default retained report/summary pairs. */
+const DEFAULT_KEEP_REPORTS = 30;
+
+const REPORT_PREFIX = 'cleanup-report-';
+const SUMMARY_PREFIX = 'cleanup-summary-';
 
 /**
  * Reporter for generating cleanup summaries and logs
@@ -13,10 +20,16 @@ export class Reporter {
   private logger!: winston.Logger;
   private logPath: string;
   private silentConsole: boolean;
+  private keepReports: number;
 
-  constructor(logPath: string = './logs', silentConsole: boolean = false) {
+  constructor(
+    logPath: string = './logs',
+    silentConsole: boolean = false,
+    keepReports: number = DEFAULT_KEEP_REPORTS
+  ) {
     this.logPath = logPath;
     this.silentConsole = silentConsole;
+    this.keepReports = keepReports;
     this.setupLogger();
   }
 
@@ -83,9 +96,9 @@ export class Reporter {
 
     // Skipped resources
     if (details.skipped.length > 0) {
-      lines.push('SKIPPED RESOURCES:');
+      lines.push('SKIPPED RESOURCES (left alone on purpose):');
       details.skipped.forEach(resource => {
-        lines.push(`  ${resource.type}: ${resource.name} (${SizeCalculator.formatBytes(resource.size)})`);
+        lines.push(`  ${resource.type}: ${resource.name} (${SizeCalculator.describeSize(resource)})`);
       });
       lines.push('');
     }
@@ -111,10 +124,12 @@ export class Reporter {
       lines.push('');
     }
 
-    // Success rate
-    const totalAttempted = summary.resourcesRemoved + details.skipped.length + details.errors.length;
-    const successRate = totalAttempted > 0 ? (summary.resourcesRemoved / totalAttempted * 100).toFixed(1) : '100.0';
-    lines.push(`Success Rate: ${successRate}%`);
+    // Not a success rate: skipped resources are correct behaviour, not failures.
+    if (details.errors.length > 0) {
+      lines.push(`Failed to remove: ${details.errors.length} of ${summary.resourcesRemoved + details.errors.length} attempted`);
+    } else {
+      lines.push('No failures.');
+    }
 
     return lines.join('\n');
   }
@@ -128,7 +143,7 @@ export class Reporter {
 
     // Generate filename if not provided
     if (!filename) {
-      filename = `cleanup-report-${report.mode}-${isoSlug(report.timestamp)}.json`;
+      filename = `${REPORT_PREFIX}${report.mode}-${isoSlug(report.timestamp)}.json`;
     }
 
     const filePath = path.join(this.logPath, filename);
@@ -137,6 +152,7 @@ export class Reporter {
     try {
       await fs.promises.writeFile(filePath, reportJson, 'utf8');
       this.logger.info(`Report saved to ${filePath}`);
+      await this.pruneOldReports(`${REPORT_PREFIX}${report.mode}-`);
       return filePath;
     } catch (error) {
       const message = `Failed to save report: ${errorMessage(error)}`;
@@ -154,7 +170,7 @@ export class Reporter {
 
     // Generate filename if not provided
     if (!filename) {
-      filename = `cleanup-summary-${report.mode}-${isoSlug(report.timestamp)}.txt`;
+      filename = `${SUMMARY_PREFIX}${report.mode}-${isoSlug(report.timestamp)}.txt`;
     }
 
     const filePath = path.join(this.logPath, filename);
@@ -163,6 +179,7 @@ export class Reporter {
     try {
       await fs.promises.writeFile(filePath, summary, 'utf8');
       this.logger.info(`Summary saved to ${filePath}`);
+      await this.pruneOldReports(`${SUMMARY_PREFIX}${report.mode}-`);
       return filePath;
     } catch (error) {
       const message = `Failed to save summary: ${errorMessage(error)}`;
@@ -198,11 +215,13 @@ export class Reporter {
   }
 
   /**
-   * Log resource removal
+   * Log resource removal. `dryRun` keeps the log honest: nothing was removed,
+   * so it must not say it was.
    */
-  logResourceRemoval(resource: Resource, success: boolean, error?: string): void {
+  logResourceRemoval(resource: Resource, success: boolean, error?: string, dryRun = false): void {
     if (success) {
-      this.logger.info(`Removed ${resource.type}: ${resource.name}`, {
+      const action = dryRun ? 'Would remove' : 'Removed';
+      this.logger.info(`${action} ${resource.type}: ${resource.name}`, {
         resourceType: resource.type,
         resourceName: resource.name,
         resourceId: resource.id,
@@ -331,6 +350,18 @@ export class Reporter {
     });
 
     return counts;
+  }
+
+  /**
+   * Bound the report/summary files; logrotate only covers `*.log`.
+   * The prefix includes the mode, so previews cannot evict the record of a
+   * real cleanup.
+   */
+  private async pruneOldReports(prefix: string): Promise<void> {
+    const deleted = await pruneOldest(this.logPath, prefix, this.keepReports);
+    if (deleted.length > 0) {
+      this.logger.info(`Pruned ${deleted.length} old ${prefix}* file(s), keeping the newest ${this.keepReports}`);
+    }
   }
 
   /**

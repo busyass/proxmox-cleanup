@@ -1,6 +1,6 @@
 import { ResourceScanner } from '../ResourceScanner';
 import { IDockerClient } from '../../interfaces';
-import { ContainerResource, ImageResource, VolumeResource, NetworkResource, Resource } from '../../types';
+import { ContainerResource, ContainerStatus, ImageResource, VolumeResource, NetworkResource, Resource } from '../../types';
 import * as fc from 'fast-check';
 
 // Mock Docker client for testing
@@ -105,13 +105,12 @@ const containerArbitrary = fc.record({
   size: fc.nat(),
   createdAt: fc.date(),
   tags: fc.array(fc.string()),
-  status: fc.oneof(
-    fc.constant('running' as const),
-    fc.constant('stopped' as const),
-    fc.constant('exited' as const)
+  status: fc.constantFrom<ContainerStatus>(
+    'created', 'running', 'paused', 'restarting', 'exited', 'removing', 'dead'
   ),
   imageId: fc.string({ minLength: 1 }),
-  volumes: fc.array(fc.string())
+  volumes: fc.array(fc.string()),
+  networks: fc.array(fc.string())
 });
 
 const imageArbitrary = fc.record({
@@ -299,9 +298,10 @@ describe('ResourceScanner - Dry Run Mode', () => {
               size: 1000,
               createdAt: new Date(),
               tags: [],
-              status: 'stopped' as const,
+              status: 'exited' as const,
               imageId: `image${i}`,
-              volumes: []
+              volumes: [],
+              networks: []
             }));
 
             const images: ImageResource[] = Array.from({ length: testData.imageCount }, (_, i) => ({
@@ -387,9 +387,10 @@ describe('ResourceScanner - Dry Run Mode', () => {
           size: 1000,
           createdAt: new Date(),
           tags: [],
-          status: 'stopped',
+          status: 'exited',
           imageId: 'image1',
-          volumes: []
+          volumes: [],
+          networks: []
         }
       ];
 

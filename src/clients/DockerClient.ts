@@ -1,12 +1,42 @@
 import Docker from 'dockerode';
 import {
   ContainerResource,
+  ContainerStatus,
   ImageResource,
   VolumeResource,
   NetworkResource,
   CleanupError
 } from '../types';
 import { IDockerClient } from '../interfaces';
+import { CleanupOperationError } from '../utils/errors';
+
+/**
+ * Flatten labels to the tags protection patterns match against: both the bare
+ * key and `key=value`, so `tag:backup` and `tag:backup=keep` both work.
+ */
+function labelsToTags(labels?: Record<string, string>): string[] {
+  if (!labels) return [];
+  const tags: string[] = [];
+  for (const [key, value] of Object.entries(labels)) {
+    tags.push(key);
+    if (value) tags.push(`${key}=${value}`);
+  }
+  return tags;
+}
+
+/**
+ * Total map of the Engine's container states. Deliberately exhaustive: an
+ * unrecognised state must resolve to `unknown`, not to something deletable.
+ */
+const CONTAINER_STATUS_BY_STATE: Record<string, ContainerStatus> = {
+  created: 'created',
+  running: 'running',
+  paused: 'paused',
+  restarting: 'restarting',
+  exited: 'exited',
+  removing: 'removing',
+  dead: 'dead'
+};
 
 /**
  * Docker API client implementation
@@ -16,7 +46,8 @@ export class DockerClient implements IDockerClient {
   private connected: boolean = false;
 
   constructor(socketPath?: string) {
-    // Default to Unix socket, can be overridden for remote connections
+    // DOCKER_HOST still wins: docker-modem ignores socketPath when it resolves
+    // a host from the environment.
     this.docker = new Docker({
       socketPath: socketPath || '/var/run/docker.sock'
     });
@@ -44,8 +75,7 @@ export class DockerClient implements IDockerClient {
   }
 
   /**
-   * List all containers (running and stopped).
-   * Passes `size: true` so Docker populates SizeRw for each container.
+   * List all containers. `size: true` is required for SizeRw to be populated.
    */
   async listContainers(all: boolean = true): Promise<ContainerResource[]> {
     return this.listResources('containers', async () => {
@@ -57,36 +87,41 @@ export class DockerClient implements IDockerClient {
         type: 'container' as const,
         size: (container as Docker.ContainerInfo & { SizeRw?: number }).SizeRw || 0,
         createdAt: new Date(container.Created * 1000),
-        tags: container.Labels ? Object.keys(container.Labels) : [],
+        tags: labelsToTags(container.Labels),
         status: this.mapContainerStatus(container.State),
         imageId: container.ImageID,
-        // Only named volumes — bind mounts report Name === '' and would
-        // otherwise leak host paths into what callers treat as volume names.
+        // Named volumes only: bind mounts have no Name and would leak host paths.
         volumes: container.Mounts
           ?.filter(m => m.Type === 'volume' && m.Name)
-          .map(m => m.Name as string) || []
+          .map(m => m.Name as string) || [],
+        // The network list endpoint stopped reporting attachment in API 1.28,
+        // so it has to come from the container side.
+        networks: Object.keys(container.NetworkSettings?.Networks || {})
       }));
     });
   }
 
   /**
-   * List all images
+   * List images. No `all: true`: that adds intermediate layers, which always
+   * have descendants and so can never be removed. Dangling images are
+   * final-layer and appear without it.
    */
   async listImages(): Promise<ImageResource[]> {
     return this.listResources('images', async () => {
-      const images = await this.docker.listImages({ all: true });
+      const images = await this.docker.listImages();
 
       return images.map(image => {
-        const repoTag = image.RepoTags?.[0] || '<none>:<none>';
-        const [repository, tag] = repoTag.split(':');
+        const repoTag = image.RepoTags?.[0];
+        const { repository, tag } = this.splitRepoTag(repoTag);
 
         return {
           id: image.Id,
-          name: repoTag,
+          // Untagged images all share one name, so add a short id to tell them apart.
+          name: repoTag || `<none>:<none> (${this.shortId(image.Id)})`,
           type: 'image' as const,
           size: image.Size || 0,
           createdAt: new Date(image.Created * 1000),
-          tags: image.Labels ? Object.keys(image.Labels) : [],
+          tags: labelsToTags(image.Labels),
           repository,
           tag,
           usedByContainers: [] // Will be populated by scanner
@@ -111,7 +146,7 @@ export class DockerClient implements IDockerClient {
           type: 'volume' as const,
           size: 0, // Docker API doesn't provide volume size directly
           createdAt: rawCreated ? new Date(rawCreated) : undefined,
-          tags: volume.Labels ? Object.keys(volume.Labels) : [],
+          tags: labelsToTags(volume.Labels),
           mountPoint: volume.Mountpoint,
           usedByContainers: [] // Will be populated by scanner
         };
@@ -120,7 +155,8 @@ export class DockerClient implements IDockerClient {
   }
 
   /**
-   * List all networks
+   * List all networks. `connectedContainers` is left empty: the list endpoint
+   * does not report attachment, so the scanner derives it from containers.
    */
   async listNetworks(): Promise<NetworkResource[]> {
     return this.listResources('networks', async () => {
@@ -132,24 +168,26 @@ export class DockerClient implements IDockerClient {
         type: 'network' as const,
         size: 0, // Networks don't have size
         createdAt: network.Created ? new Date(network.Created) : undefined,
-        tags: network.Labels ? Object.keys(network.Labels) : [],
+        tags: labelsToTags(network.Labels),
         driver: network.Driver,
-        connectedContainers: Object.keys(network.Containers || {})
+        connectedContainers: []
       }));
     });
   }
 
   /**
-   * Remove a container by ID
+   * Remove a container by ID. No `force`, so the Engine's 409 on a running
+   * container stays a backstop rather than becoming a kill.
    */
   async removeContainer(id: string): Promise<void> {
     return this.removeResource('Container', id, () =>
-      this.docker.getContainer(id).remove({ force: true })
+      this.docker.getContainer(id).remove()
     );
   }
 
   /**
-   * Remove an image by ID
+   * Remove an image by ID. `force` here only covers stopped-container use and
+   * extra tags, which the scan has already accounted for.
    */
   async removeImage(id: string): Promise<void> {
     return this.removeResource('Image', id, () =>
@@ -175,23 +213,39 @@ export class DockerClient implements IDockerClient {
     );
   }
 
-  /**
-   * Run a list operation behind the shared connected-guard + error wrapper.
-   */
+  /** Split `repo:tag` on the last colon, since a registry may carry a port. */
+  private splitRepoTag(repoTag?: string): { repository: string; tag: string } {
+    if (!repoTag) return { repository: '<none>', tag: '<none>' };
+
+    const lastColon = repoTag.lastIndexOf(':');
+    // A colon before the final path separator is a registry port, not a tag.
+    if (lastColon < 0 || lastColon < repoTag.lastIndexOf('/')) {
+      return { repository: repoTag, tag: '<none>' };
+    }
+    return {
+      repository: repoTag.slice(0, lastColon),
+      tag: repoTag.slice(lastColon + 1)
+    };
+  }
+
+  /** The 12-character form `docker images` displays. */
+  private shortId(id: string): string {
+    return id.replace(/^sha256:/, '').substring(0, 12);
+  }
+
+  /** Shared connected-guard and error wrapper for the list operations. */
   private async listResources<T>(label: string, fetch: () => Promise<T>): Promise<T> {
     this.ensureConnected();
     try {
       return await fetch();
     } catch (error) {
-      const cleanupError = this.createError('unknown', `Failed to list ${label}`, error);
-      throw new Error(cleanupError.message);
+      throw this.operationError('unknown', `Failed to list ${label}`, error);
     }
   }
 
   /**
-   * Run a remove operation behind the shared connected-guard, mapping the
-   * Docker daemon's 404 (not found) and 409 (in use) status codes to typed
-   * cleanup errors.
+   * Shared guard for the remove operations, mapping daemon status codes to
+   * typed errors. 403 is here because networks report "in use" that way.
    */
   private async removeResource(kind: string, id: string, remove: () => Promise<unknown>): Promise<void> {
     this.ensureConnected();
@@ -200,49 +254,43 @@ export class DockerClient implements IDockerClient {
     } catch (error: unknown) {
       const statusCode = (error as { statusCode?: number }).statusCode;
       if (statusCode === 404) {
-        const cleanupError = this.createError('resource_not_found', `${kind} ${id} not found`, error);
-        throw new Error(cleanupError.message);
+        throw this.operationError('resource_not_found', `${kind} ${id} not found`, error);
       }
-      if (statusCode === 409) {
-        const cleanupError = this.createError('resource_in_use', `${kind} ${id} is in use`, error);
-        throw new Error(cleanupError.message);
+      if (statusCode === 409 || statusCode === 403) {
+        throw this.operationError('resource_in_use', `${kind} ${id} is still in use`, error);
       }
-      const cleanupError = this.createError('unknown', `Failed to remove ${kind.toLowerCase()} ${id}`, error);
-      throw new Error(cleanupError.message);
+      throw this.operationError('unknown', `Failed to remove ${kind.toLowerCase()} ${id}`, error);
     }
   }
 
-  /**
-   * Map Docker container state to our status type
-   */
-  private mapContainerStatus(state: string): 'running' | 'stopped' | 'exited' {
-    switch (state.toLowerCase()) {
-    case 'running':
-      return 'running';
-    case 'exited':
-      return 'exited';
-    default:
-      return 'stopped';
-    }
+  /** Unrecognised states resolve to `unknown`, which is never removable. */
+  private mapContainerStatus(state: string): ContainerStatus {
+    return CONTAINER_STATUS_BY_STATE[state?.toLowerCase()] ?? 'unknown';
   }
 
-  /**
-   * Ensure client is connected before operations
-   */
+  /** Guard against operating on an unconnected client. */
   private ensureConnected(): void {
     if (!this.connected) {
       throw new Error('Docker client is not connected. Call connect() first.');
     }
   }
 
-  /**
-   * Create a standardized error object
-   */
+  /** Typed error carrying its classification to the caller. */
+  private operationError(
+    type: CleanupError['type'],
+    message: string,
+    originalError?: unknown
+  ): CleanupOperationError {
+    const cleanupError = this.createError(type, message, originalError);
+    return new CleanupOperationError(type, cleanupError.message, cleanupError.recoverable);
+  }
+
+  /** Build the standard error shape. */
   private createError(type: CleanupError['type'], message: string, originalError?: unknown): CleanupError {
-    const errorMessage = originalError instanceof Error ? originalError.message : 'Unknown error';
+    const detail = originalError instanceof Error ? originalError.message.trim() : 'Unknown error';
     return {
       type,
-      message: `${message}: ${errorMessage}`,
+      message: `${message}: ${detail}`,
       timestamp: new Date(),
       recoverable: type === 'network' || type === 'resource_not_found'
     };

@@ -3,8 +3,9 @@
 const path = require('path');
 const cliPath = path.join(__dirname, '..', 'dist', 'cli', 'index.js');
 
+let cli;
 try {
-  require(cliPath);
+  cli = require(cliPath);
 } catch (err) {
   if (err && err.code === 'MODULE_NOT_FOUND' && err.message.includes('dist/cli/index.js')) {
     console.error('proxmox-cleanup: build output is missing at ' + cliPath + '.');
@@ -13,3 +14,13 @@ try {
   }
   throw err;
 }
+
+// Called explicitly: requiring the module makes `require.main` this shim, so
+// the CLI's own direct-execution guard never fires.
+if (typeof cli.main !== 'function') {
+  console.error('proxmox-cleanup: build output at ' + cliPath + ' is stale or incomplete.');
+  console.error('Run `npm run build` in the install directory, or reinstall the package.');
+  process.exit(1);
+}
+
+cli.main();

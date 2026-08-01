@@ -1,4 +1,6 @@
 import * as fs from 'fs/promises';
+import * as os from 'os';
+import * as path from 'path';
 import { BackupManager } from '../BackupManager';
 import { Resource } from '../../types';
 
@@ -64,5 +66,75 @@ describe('BackupManager Error Handling', () => {
         // Ignore cleanup errors
       }
     }
+  });
+});
+
+describe('BackupManager retention and metadata', () => {
+  const resources: Resource[] = [
+    { id: 'r1', name: 'r1', type: 'image', size: 500, tags: [] }
+  ];
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'pcx-backup-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('records the configured Proxmox host, not just an env var', async () => {
+    const manager = new BackupManager(dir, 'pve.example.com');
+
+    const result = await manager.createBackup(resources);
+    const backup = await manager.loadBackup(result.backupPath);
+
+    expect(backup.metadata.proxmoxHost).toBe('pve.example.com');
+    expect(backup.metadata.totalSize).toBe(500);
+    expect(backup.metadata.resourceCount).toBe(1);
+  });
+
+  it('falls back to PROXMOX_HOST, then to "unknown"', async () => {
+    const original = process.env.PROXMOX_HOST;
+    try {
+      process.env.PROXMOX_HOST = 'env-host';
+      const viaEnv = new BackupManager(dir);
+      const envResult = await viaEnv.createBackup(resources);
+      expect((await viaEnv.loadBackup(envResult.backupPath)).metadata.proxmoxHost).toBe('env-host');
+
+      delete process.env.PROXMOX_HOST;
+      const viaNothing = new BackupManager(dir);
+      const bareResult = await viaNothing.createBackup(resources);
+      expect((await viaNothing.loadBackup(bareResult.backupPath)).metadata.proxmoxHost).toBe('unknown');
+    } finally {
+      if (original === undefined) delete process.env.PROXMOX_HOST;
+      else process.env.PROXMOX_HOST = original;
+    }
+  });
+
+  it('prunes older backups so the directory stays bounded', async () => {
+    const manager = new BackupManager(dir, 'pve.local', 2);
+
+    for (let i = 0; i < 4; i++) {
+      await manager.createBackup(resources);
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+
+    const files = (await fs.readdir(dir)).filter(f => f.startsWith('cleanup_'));
+    expect(files).toHaveLength(2);
+  });
+
+  it('writes distinct files even for backups in the same millisecond', async () => {
+    // A timestamp alone collides readily, and the second backup would
+    // overwrite the first, losing the record of what that run deleted.
+    const manager = new BackupManager(dir, 'pve.local');
+
+    const paths: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      paths.push((await manager.createBackup(resources)).backupPath);
+    }
+
+    expect(new Set(paths).size).toBe(5);
+    expect((await fs.readdir(dir)).filter(f => f.startsWith('cleanup_'))).toHaveLength(5);
   });
 });

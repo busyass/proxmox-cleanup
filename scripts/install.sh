@@ -345,6 +345,7 @@ Wants=docker.service
 
 [Service]
 Type=oneshot
+WorkingDirectory=$CONFIG_DIR
 ExecStart=/usr/local/bin/proxmox-cleanup cleanup -c $CONFIG_DIR/config.json
 User=root
 StandardOutput=journal
@@ -374,6 +375,10 @@ $LOG_DIR/*.log {
     create 644 root root
 }
 EOF
+
+    # Report and summary files are pruned by the tool itself (reporting.keepReports
+    # in config.json), because they are not *.log and an npm-installed copy never
+    # runs this installer.
     
     log_success "Log rotation configured"
 }

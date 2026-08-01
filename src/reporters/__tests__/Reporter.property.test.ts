@@ -240,7 +240,7 @@ describe('Reporter Property Tests', () => {
 
       const summary = reporter.generateSummary(report);
       expect(summary).toContain('Resources Scanned: 0');
-      expect(summary).toContain('Success Rate: 100.0%');
+      expect(summary).toContain('No failures.');
     });
 
     it('should handle reports with only errors', async () => {
@@ -266,10 +266,10 @@ describe('Reporter Property Tests', () => {
 
       const summary = reporter.generateSummary(report);
       expect(summary).toContain('ERRORS:');
-      expect(summary).toContain('Success Rate: 0.0%');
+      expect(summary).toContain('Failed to remove: 1 of 1 attempted');
     });
 
-    it('should calculate success rate correctly', async () => {
+    it('counts only real failures, never intentional skips', async () => {
       const mixedResult: CleanupResult = {
         removed: [
           { id: '1', name: 'container1', type: 'container', size: 1000, createdAt: new Date(), tags: [] } as Resource
@@ -292,8 +292,13 @@ describe('Reporter Property Tests', () => {
       const report = reporter.generateReport('cleanup', [], mixedResult, 3000);
       const summary = reporter.generateSummary(report);
 
-      // Success rate should be 1 removed / 3 total = 33.3%
-      expect(summary).toContain('Success Rate: 33.3%');
+      // 1 removed, 1 error => "1 of 2 attempted". The skipped resource is the
+      // tool working correctly (still in use), so it must NOT count as a
+      // failure — the old "Success Rate: 33.3%" told a user with protected
+      // resources that two thirds of their clean run had failed.
+      expect(summary).toContain('Failed to remove: 1 of 2 attempted');
+      expect(summary).not.toContain('Success Rate');
+      expect(summary).toContain('SKIPPED RESOURCES (left alone on purpose):');
     });
   });
 
@@ -388,14 +393,77 @@ describe('Reporter Property Tests', () => {
       expect(report.details.skippedUnknownAge).toEqual([vol]);
     });
 
-    it('excludes unknown-age from the success-rate denominator', () => {
+    it('excludes unknown-age resources from the failure count', () => {
       const removed = [{ id: 'i', name: 'i', type: 'image' as const, size: 5, tags: [] }];
       const unknown = Array.from({ length: 9 }, (_, n) => ({
         id: `v${n}`, name: `v${n}`, type: 'volume' as const, size: 0, tags: []
       }));
       const report = reporter.generateReport('cleanup', [], baseResult({ removed, skippedUnknownAge: unknown }), 1);
-      // 1 removed, 0 skipped(in-use), 0 errors => 100%, NOT 1/10.
-      expect(reporter.generateSummary(report)).toContain('Success Rate: 100.0%');
+      // 9 undated volumes were skipped on purpose, not failures.
+      expect(reporter.generateSummary(report)).toContain('No failures.');
+    });
+  });
+
+  // The installer's logrotate rule only matches *.log, so nothing else bounds
+  // these files. Unbounded, a daily timer writes 730 pairs a year — a
+  // disk-cleanup tool leaking disk.
+  describe('report retention', () => {
+    const emptyResult = {
+      removed: [], skipped: [], errors: [], diskSpaceFreed: 0, executionTime: 0
+    };
+
+    it('keeps only the newest report/summary pairs', async () => {
+      const bounded = new Reporter(testLogPath, true, 3);
+
+      for (let i = 0; i < 6; i++) {
+        // Distinct timestamps drive distinct filenames.
+        const report = bounded.generateReport('cleanup', [], emptyResult, 0);
+        report.timestamp = new Date(Date.UTC(2026, 0, i + 1));
+        await bounded.saveReport(report);
+        await bounded.saveSummary(report);
+      }
+
+      const files = await fs.promises.readdir(testLogPath);
+      expect(files.filter(f => f.startsWith('cleanup-report-'))).toHaveLength(3);
+      expect(files.filter(f => f.startsWith('cleanup-summary-'))).toHaveLength(3);
+      // winston owns the .log files; pruning must not touch them.
+      expect(files).toContain('cleanup.log');
+    });
+
+    it('does not let dry-run previews evict the record of a real cleanup', async () => {
+      // Retention is per mode. Sharing one budget meant a few previews pushed
+      // out the report of what a cleanup had actually deleted.
+      const bounded = new Reporter(testLogPath, true, 2);
+
+      const write = async (mode: 'cleanup' | 'dry-run', day: number) => {
+        const report = bounded.generateReport(mode, [], emptyResult, 0);
+        report.timestamp = new Date(Date.UTC(2026, 7, day));
+        await bounded.saveReport(report);
+      };
+
+      await write('cleanup', 1);
+      for (const day of [2, 3, 4, 5]) await write('dry-run', day);
+
+      const reports = (await fs.promises.readdir(testLogPath))
+        .filter(f => f.startsWith('cleanup-report-'));
+
+      expect(reports.filter(f => f.includes('-cleanup-'))).toHaveLength(1);
+      expect(reports.filter(f => f.includes('-dry-run-'))).toHaveLength(2);
+    });
+
+    it('keeps the most recent pair, not an arbitrary one', async () => {
+      const bounded = new Reporter(testLogPath, true, 1);
+
+      for (const day of [1, 2, 3]) {
+        const report = bounded.generateReport('cleanup', [], emptyResult, 0);
+        report.timestamp = new Date(Date.UTC(2026, 0, day));
+        await bounded.saveReport(report);
+      }
+
+      const reports = (await fs.promises.readdir(testLogPath))
+        .filter(f => f.startsWith('cleanup-report-'));
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toContain('2026-01-03');
     });
   });
 });
