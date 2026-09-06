@@ -268,6 +268,44 @@ describe('ProxmoxCleanupCLI', () => {
       expect(config.proxmox.token).toBe('custom-token');
     });
 
+    describe('PROXMOX_TOKEN env var', () => {
+      const originalEnv = process.env.PROXMOX_TOKEN;
+
+      afterEach(() => {
+        if (originalEnv === undefined) {
+          delete process.env.PROXMOX_TOKEN;
+        } else {
+          process.env.PROXMOX_TOKEN = originalEnv;
+        }
+      });
+
+      // --proxmox-token puts the secret in shell history and `ps` output;
+      // this is the way to avoid that without putting it in config.json.
+      it('falls back to PROXMOX_TOKEN when no flag or config value is set', async () => {
+        process.env.PROXMOX_TOKEN = 'env-token';
+        const config = await (cli as any).loadConfig({});
+        expect(config.proxmox.token).toBe('env-token');
+      });
+
+      it('still lets --proxmox-token win over the env var', async () => {
+        process.env.PROXMOX_TOKEN = 'env-token';
+        const config = await (cli as any).loadConfig({ proxmoxToken: 'flag-token' });
+        expect(config.proxmox.token).toBe('flag-token');
+      });
+
+      it('still lets a config file value win over the env var', async () => {
+        process.env.PROXMOX_TOKEN = 'env-token';
+        mockFs.existsSync.mockReturnValue(true);
+        mockFs.readFileSync.mockReturnValue(JSON.stringify({
+          proxmox: { host: 'pve.local', token: 'config-token' },
+          cleanup: { dryRun: false, resourceTypes: [], protectedPatterns: [], backupEnabled: true, backupPath: './backups' },
+          reporting: { verbose: false, logPath: './logs' }
+        }));
+        const config = await (cli as any).loadConfig({ config: '/path/to/config.json' });
+        expect(config.proxmox.token).toBe('config-token');
+      });
+    });
+
     // The gap that let the path options stay broken for three releases: every
     // existing test passed the flags, so nothing asserted what happens when a
     // user relies on their config file alone. commander used to supply
@@ -304,6 +342,17 @@ describe('ProxmoxCleanupCLI', () => {
         const config = await (cli as any).loadConfig({ config: '/etc/proxmox-cleanup/config.json' });
         expect(config.cleanup.protectedPatterns).toEqual(['production-*']);
         expect(config.cleanup.backupEnabled).toBe(true);
+      });
+
+      // `-p` used to replace the config file's patterns outright, so a
+      // one-off `-p "test-*"` alongside a config guarding `production-*`
+      // silently dropped that protection for the run.
+      it('adds -p patterns to the config file\'s patterns, does not replace them', async () => {
+        const config = await (cli as any).loadConfig({
+          config: '/etc/proxmox-cleanup/config.json',
+          protect: 'test-*'
+        });
+        expect(config.cleanup.protectedPatterns).toEqual(['production-*', 'test-*']);
       });
 
       it('still lets an explicit flag win over the config file', async () => {
@@ -791,6 +840,40 @@ describe('ProxmoxCleanupCLI', () => {
 
       expect(consoleOutput.some(line => line.includes('Disk Space Freed:'))).toBe(true);
       expect(consoleOutput.some(line => line.includes('Disk Space  Freed'))).toBe(false);
+    });
+
+    // diskSpaceFreed is a lower bound whenever a volume or network was
+    // removed — the Docker Engine doesn't report their size, so they always
+    // contribute 0 even though real space was freed.
+    it('discloses that Disk Space Freed is a lower bound when a volume or network was removed', () => {
+      (cli as any).displayReport({
+        mode: 'cleanup' as const,
+        summary: { resourcesScanned: 2, resourcesRemoved: 2, diskSpaceFreed: 1048576, executionTime: 1 },
+        details: {
+          removed: [
+            { name: 'container1', type: 'container', size: 1048576 },
+            { name: 'vol1', type: 'volume', size: 0 }
+          ],
+          skipped: [],
+          errors: []
+        }
+      });
+
+      expect(consoleOutput.some(line => line.includes('aren\'t reported by the Docker Engine'))).toBe(true);
+    });
+
+    it('does not show the lower-bound note when every removed resource has a known size', () => {
+      (cli as any).displayReport({
+        mode: 'cleanup' as const,
+        summary: { resourcesScanned: 1, resourcesRemoved: 1, diskSpaceFreed: 1048576, executionTime: 1 },
+        details: {
+          removed: [{ name: 'container1', type: 'container', size: 1048576 }],
+          skipped: [],
+          errors: []
+        }
+      });
+
+      expect(consoleOutput.some(line => line.includes('aren\'t reported by the Docker Engine'))).toBe(false);
     });
 
     it('should display resource list correctly', () => {

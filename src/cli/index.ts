@@ -14,9 +14,6 @@ import { errorMessage } from '../utils/errors';
 import * as fs from 'fs';
 import * as path from 'path';
 
-/**
- * CLI options interface
- */
 interface CliOptions {
   dryRun?: boolean;
   types?: string;
@@ -32,9 +29,6 @@ interface CliOptions {
   olderThan?: string;
 }
 
-/**
- * CLI interface for Proxmox Cleanup System
- */
 class ProxmoxCleanupCLI {
   private program: Command;
 
@@ -62,9 +56,6 @@ class ProxmoxCleanupCLI {
     return '0.0.0';
   }
 
-  /**
-   * Setup CLI commands and options
-   */
   private setupCommands(): void {
     this.program
       .name('proxmox-cleanup')
@@ -85,7 +76,7 @@ class ProxmoxCleanupCLI {
       .option('-v, --verbose', 'Enable verbose logging')
       .option('--log-path <path>', 'Custom log directory path (default: ./logs)')
       .option('--proxmox-host <host>', 'Proxmox host address')
-      .option('--proxmox-token <token>', 'Proxmox API token (format: user@realm:password)')
+      .option('--proxmox-token <token>', 'Proxmox API token (user@realm:password, or the newer user@realm!tokenid:secret)')
       .option('--older-than <duration>', 'Only act on resources created before now minus this duration (e.g. 7d, 12h)')
       .option('--json', 'Output machine-readable JSON only (suppresses human output)')
       .action(async (options) => {
@@ -111,7 +102,7 @@ class ProxmoxCleanupCLI {
       .option('-v, --verbose', 'Enable verbose logging')
       .option('--log-path <path>', 'Custom log directory path (default: ./logs)')
       .option('--proxmox-host <host>', 'Proxmox host address')
-      .option('--proxmox-token <token>', 'Proxmox API token (format: user@realm:password)')
+      .option('--proxmox-token <token>', 'Proxmox API token (user@realm:password, or the newer user@realm!tokenid:secret)')
       .option('--older-than <duration>', 'Only act on resources created before now minus this duration (e.g. 7d, 12h)')
       .option('--json', 'Output machine-readable JSON only (suppresses human output)')
       .action(async (options) => {
@@ -169,16 +160,10 @@ class ProxmoxCleanupCLI {
       });
   }
 
-  /**
-   * Emit JSON to stdout
-   */
   private emitJson(payload: unknown): void {
     console.log(JSON.stringify(payload, null, 2));
   }
 
-  /**
-   * Execute cleanup operation
-   */
   private async executeCleanup(options: CliOptions): Promise<void> {
     if (!options.json) {
       console.log('🚀 Starting Proxmox Docker cleanup...\n');
@@ -201,9 +186,6 @@ class ProxmoxCleanupCLI {
     }
   }
 
-  /**
-   * Execute dry-run operation
-   */
   private async executeDryRun(options: CliOptions): Promise<void> {
     if (!options.json) {
       console.log('🔍 Starting dry-run preview...\n');
@@ -221,9 +203,6 @@ class ProxmoxCleanupCLI {
     }
   }
 
-  /**
-   * List unused resources
-   */
   private async listResources(options: CliOptions): Promise<void> {
     if (!options.json) {
       console.log('📋 Listing unused Docker resources...\n');
@@ -258,9 +237,6 @@ class ProxmoxCleanupCLI {
     this.displayResourceList(resources, skippedUnknownAge);
   }
 
-  /**
-   * Validate configuration file
-   */
   private async validateConfig(options: CliOptions): Promise<void> {
     const checks: Record<string, boolean | null> = {
       structure: false,
@@ -317,9 +293,6 @@ class ProxmoxCleanupCLI {
     }
   }
 
-  /**
-   * Load configuration from file or CLI options
-   */
   private async loadConfig(options: CliOptions): Promise<CleanupConfig> {
     let config: CleanupConfig;
 
@@ -345,9 +318,6 @@ class ProxmoxCleanupCLI {
     return config;
   }
 
-  /**
-   * Create default configuration
-   */
   private createDefaultConfig(): CleanupConfig {
     return {
       proxmox: {
@@ -368,11 +338,7 @@ class ProxmoxCleanupCLI {
     };
   }
 
-  /**
-   * Apply CLI options to configuration
-   */
   private applyCliOptions(config: CleanupConfig, options: CliOptions): void {
-    // Dry-run mode
     if (options.dryRun) {
       config.cleanup.dryRun = true;
     }
@@ -382,12 +348,13 @@ class ProxmoxCleanupCLI {
       config.cleanup.resourceTypes = this.parseResourceTypes(options.types);
     }
 
-    // Protection patterns
+    // Adds to the config file's patterns rather than replacing them, so `-p`
+    // can't silently drop protection the config already set up.
     if (options.protect) {
-      config.cleanup.protectedPatterns = options.protect.split(',').map(p => p.trim());
+      const cliPatterns = options.protect.split(',').map(p => p.trim());
+      config.cleanup.protectedPatterns = [...config.cleanup.protectedPatterns, ...cliPatterns];
     }
 
-    // Backup settings
     if (options.backup !== undefined) {
       config.cleanup.backupEnabled = options.backup;
     }
@@ -395,7 +362,6 @@ class ProxmoxCleanupCLI {
       config.cleanup.backupPath = options.backupPath;
     }
 
-    // Reporting settings
     if (options.verbose) {
       config.reporting.verbose = true;
     }
@@ -403,15 +369,16 @@ class ProxmoxCleanupCLI {
       config.reporting.logPath = options.logPath;
     }
 
-    // Proxmox settings
     if (options.proxmoxHost) {
       config.proxmox.host = options.proxmoxHost;
     }
     if (options.proxmoxToken) {
       config.proxmox.token = options.proxmoxToken;
+    } else if (!config.proxmox.token && process.env.PROXMOX_TOKEN) {
+      // Avoids putting the secret in shell history / `ps` output.
+      config.proxmox.token = process.env.PROXMOX_TOKEN;
     }
 
-    // Age filtering
     if (options.olderThan) {
       config.cleanup.minAge = options.olderThan;
     }
@@ -435,9 +402,6 @@ class ProxmoxCleanupCLI {
     );
   }
 
-  /**
-   * Parse resource types from string
-   */
   private parseResourceTypes(typesString: string): ResourceType[] {
     // Empty means no type filter.
     if (typesString.trim().toLowerCase() === 'all') return [];
@@ -468,28 +432,21 @@ class ProxmoxCleanupCLI {
     return parsedTypes;
   }
 
-  /**
-   * Create orchestrator with all dependencies
-   */
   private async createOrchestrator(config: CleanupConfig, options: CliOptions): Promise<CleanupOrchestrator> {
     this.assertProtectionPatternsUsable(config.cleanup.protectedPatterns);
 
-    // Create Docker client
     const dockerClient = new DockerClient();
     await dockerClient.connect();
 
-    // Create resource filter and scanner
     const resourceScanner = new ResourceScanner(dockerClient, config.cleanup.protectedPatterns);
     resourceScanner.setDryRun(config.cleanup.dryRun);
 
-    // Create backup manager
     const backupManager = new BackupManager(
       config.cleanup.backupPath,
       config.proxmox.host,
       config.cleanup.keepBackups
     );
 
-    // Create reporter
     const reporter = new Reporter(
       config.reporting.logPath,
       options.json === true,
@@ -505,9 +462,6 @@ class ProxmoxCleanupCLI {
     );
   }
 
-  /**
-   * Display cleanup report
-   */
   private displayReport(report: Report): void {
     // From the report, so no caller can contradict what actually ran.
     const isDryRun = report.mode === 'dry-run';
@@ -520,6 +474,9 @@ class ProxmoxCleanupCLI {
     console.log(`📊 Resources Scanned: ${report.summary.resourcesScanned}`);
     console.log(`${isDryRun ? '📋' : '🗑️'} Resources${isDryRun ? ' Would Be' : ''} Removed: ${report.summary.resourcesRemoved}`);
     console.log(`💾 Disk Space ${isDryRun ? 'Would Be ' : ''}Freed: ${SizeCalculator.formatBytes(report.summary.diskSpaceFreed)}`);
+    if (report.details.removed.some(r => !SizeCalculator.hasKnownSize(r))) {
+      console.log('   (at least this much — volume and network sizes aren\'t reported by the Docker Engine)');
+    }
     console.log(`⏱️ Execution Time: ${report.summary.executionTime}ms`);
 
     if (report.details.skipped.length > 0) {
@@ -537,7 +494,7 @@ class ProxmoxCleanupCLI {
       });
     }
 
-    // Show detailed resource list if verbose or dry-run
+    // Always for dry-run; for a completed cleanup, only if short enough to skim.
     if (isDryRun || report.details.removed.length <= 10) {
       if (report.details.removed.length > 0) {
         console.log(`\n📋 ${isDryRun ? 'Resources to be removed:' : 'Removed resources:'}`);
@@ -558,9 +515,6 @@ class ProxmoxCleanupCLI {
     }
   }
 
-  /**
-   * Display resource list
-   */
   private displayResourceList(resources: Resource[], skippedUnknownAge: Resource[] = []): void {
     if (resources.length === 0) {
       console.log('🎉 No unused resources found!');
@@ -570,7 +524,6 @@ class ProxmoxCleanupCLI {
 
     console.log(`📋 Found ${resources.length} unused ${this.plural(resources.length, 'resource')}:\n`);
 
-    // Group by type
     const grouped = resources.reduce<Record<string, Resource[]>>((acc, resource) => {
       if (!acc[resource.type]) {
         acc[resource.type] = [];
@@ -579,7 +532,6 @@ class ProxmoxCleanupCLI {
       return acc;
     }, {});
 
-    // Display each type
     Object.entries(grouped).forEach(([type, typeResources]) => {
       const icon = this.getResourceIcon(type);
       const count = typeResources.length;
@@ -613,14 +565,10 @@ class ProxmoxCleanupCLI {
     );
   }
 
-  /** Pluralise for a count. */
   private plural(count: number, noun: string): string {
     return count === 1 ? noun : `${noun}s`;
   }
 
-  /**
-   * Get emoji icon for resource type
-   */
   private getResourceIcon(type: string): string {
     const icons: Record<string, string> = {
       container: '📦',
@@ -631,9 +579,6 @@ class ProxmoxCleanupCLI {
     return icons[type] || '📄';
   }
 
-  /**
-   * Validate configuration structure
-   */
   private validateConfigStructure(config: CleanupConfig): void {
     if (!config.proxmox || !config.cleanup || !config.reporting) {
       throw new Error('Invalid configuration structure. Missing required sections.');
@@ -648,9 +593,6 @@ class ProxmoxCleanupCLI {
     }
   }
 
-  /**
-   * Run the CLI
-   */
   public async run(): Promise<void> {
     await this.program.parseAsync(process.argv);
   }

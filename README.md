@@ -3,10 +3,10 @@
 <div align="center">
 
 <!-- Platform Badges -->
-![Proxmox](https://img.shields.io/badge/Proxmox-VE%208.x-E57000?style=for-the-badge&logo=proxmox&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5.9.3-blue?style=for-the-badge&logo=typescript&logoColor=white) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-24.x-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![Proxmox](https://img.shields.io/badge/Proxmox-VE%208.x+-E57000?style=for-the-badge&logo=proxmox&logoColor=white) ![TypeScript](https://img.shields.io/badge/TypeScript-5.9.3-blue?style=for-the-badge&logo=typescript&logoColor=white) ![Node.js](https://img.shields.io/badge/Node.js-18+-339933?style=for-the-badge&logo=node.js&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-24.x+-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 
 <!-- Status Badges -->
-![Version](https://img.shields.io/badge/Version-2.0.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-3.0.0-purple?style=for-the-badge) ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge) ![Maintained](https://img.shields.io/badge/Maintained-Yes-green.svg?style=for-the-badge)
 
 <!-- Community Badges -->
 ![GitHub stars](https://img.shields.io/github/stars/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github) ![GitHub forks](https://img.shields.io/github/forks/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github) ![GitHub issues](https://img.shields.io/github/issues/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github) ![GitHub last commit](https://img.shields.io/github/last-commit/hiall-fyi/proxmox-cleanup?style=for-the-badge&logo=github)
@@ -28,13 +28,11 @@
 
 Running Docker on a Proxmox host tends to leave behind unused containers, images, volumes, and networks — quietly eating disk space. Proxmox Cleanup finds and removes them, with a few safety nets: a metadata manifest written before anything is deleted, a dry-run you can preview first, protection patterns for the things you want to keep, and dependency checks so nothing in use gets touched.
 
-One-line install, schedule it with cron, then forget about it.
-
 ---
 
 ## Quick Start
 
-**Prerequisites:** Node.js 18+, npm, Docker daemon running, Proxmox VE (optional for Proxmox integration).
+**Prerequisites:** Node.js 18+, npm, Docker daemon running, Proxmox VE (optional — only used for the connectivity check in `validate-config`).
 
 ### 1. Install
 
@@ -91,7 +89,7 @@ proxmox-cleanup cleanup -c /etc/proxmox-cleanup/config.json
 - **Automated Docker cleanup** — remove unused containers, images, volumes, and networks in one command
 - **Safety first** — backup before cleanup, dry-run mode, protected resource patterns, dependency checking
 - **Well tested** — property-based tests with `fast-check`, structured logging, explicit error reporting
-- **Proxmox VE friendly** — tested on Proxmox VE 8.x running Docker on the host
+- **Proxmox VE friendly** — tested on Proxmox VE 8.x+ running Docker on the host
 - **Scheduled runs via systemd or cron** — the installer registers a systemd unit you can drive from a timer or system cron
 - **Readable reports** — disk space freed, execution time, what was kept or skipped and why
 - **CLI with the common commands you'd expect** — `cleanup`, `dry-run`, `list`, `validate-config`, plus the usual flags
@@ -126,7 +124,8 @@ Create a `config.json` file (see `config.example.json`):
 {
   "proxmox": {
     "host": "proxmox.example.com",
-    "token": "root@pam:your-api-token"
+    "token": "root@pam:your-api-token",
+    "verifyTls": false
   },
   "cleanup": {
     "dryRun": false,
@@ -145,20 +144,22 @@ Create a `config.json` file (see `config.example.json`):
 }
 ```
 
-All configuration options can be overridden via CLI flags. A flag only takes
-effect when you actually pass it, so settings in your config file are used
-otherwise.
+Every setting here can be overridden by a CLI flag, and a flag only takes
+effect when you actually pass it — omit it and your config file wins. `-p`/
+`--protect` is the one exception: it adds to the config file's
+`protectedPatterns` rather than replacing them, covered under Protection
+Patterns below.
 
 **File retention:** each run writes a report and a summary to the log directory,
 and each cleanup writes a backup manifest. `keepReports` and `keepBackups`
 (default 30 each) bound how many of these are kept — the oldest are deleted once
 the limit is passed. The log files themselves rotate separately.
 
-**Age filtering:** The optional `minAge` setting (or `--older-than` CLI flag) accepts a duration like `7d` (7 days), `12h` (12 hours), `30m` (30 minutes). Only resources older than this are removed — age is how long ago the resource was *created*, not last-used. Accepted units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `w` (weeks).
+**Age filtering:** the optional `minAge` setting (or `--older-than` CLI flag) accepts a duration like `7d` (7 days), `12h` (12 hours), `30m` (30 minutes). Only resources older than this are removed — age is how long ago the resource was *created*, not last-used. Accepted units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `w` (weeks).
 
-**Volumes and creation time:** Docker volumes often report no creation time. When a resource's creation time is unavailable, `--older-than` skips it entirely and `cleanup`, `dry-run`, and `list` all show a separate count of these skipped resources. This keeps the tool safe by default — if the Engine can't tell you when a volume was created, the age filter won't guess.
+**Volumes and creation time:** Docker volumes often report no creation time. When a resource's creation time is unavailable, `--older-than` skips it entirely, and `cleanup`, `dry-run`, and `list` all show a separate count of these skipped resources. This keeps the tool safe by default — if the Engine can't tell you when a volume was created, the age filter won't guess.
 
-**Volume and network sizes:** the Docker Engine doesn't report either, so they show as "size unknown" rather than `0 B`. A volume listed for cleanup may still hold a lot of data.
+**Volume and network sizes:** the Docker Engine doesn't report either, so they show as "size unknown" rather than `0 B`. A volume listed for cleanup may still hold a lot of data, and a completed cleanup's "Disk Space Freed" total is a lower bound whenever one was removed — the report says so when it applies.
 
 ### Scheduling
 
@@ -190,6 +191,10 @@ systemctl enable --now proxmox-cleanup.timer
 
 ### Protection Patterns
 
+`-p`/`--protect` on the command line adds to whatever your config file already
+protects — it doesn't replace it. A config guarding `production-*` stays
+protected even if you also pass `-p "test-*"` for a one-off run.
+
 Protect resources from cleanup using patterns:
 
 - **Wildcards**: `important-*`, `*-production`, `*-system-*` (matched against the name)
@@ -208,6 +213,24 @@ unambiguous, or a prefix with nothing after it — the command stops and tells y
 which pattern is wrong instead of running with a protection list that does
 nothing.
 
+### Proxmox Credentials
+
+The `token` field accepts either form Proxmox issues: a legacy
+`user@realm:password`, or the newer, recommended API token,
+`user@realm!tokenid:secret`.
+
+However you authenticate, avoid putting it on the command line: `--proxmox-token`
+works, but it leaves the token in your shell history and visible to anyone else
+on the box via `ps`. Set a `PROXMOX_TOKEN` environment variable instead, or keep
+it in `config.json` — either beats a bare CLI flag, and an explicit
+`--proxmox-token` or a `token` in `config.json` still wins over the environment
+variable.
+
+By default the tool accepts Proxmox's certificate without verifying it, since
+Proxmox ships a self-signed one out of the box. If you've replaced it with a
+certificate from a real CA, set `"verifyTls": true` under `proxmox` in
+`config.json` to have it checked.
+
 ---
 
 ## CLI Commands Reference
@@ -221,13 +244,14 @@ proxmox-cleanup cleanup [options]
 
 Options:
   -d, --dry-run                    Preview without removing
-  -t, --types <types>              Resource types (containers,images,volumes,networks)
+  -t, --types <types>              Resource types, or all (containers,images,volumes,networks,all)
   -p, --protect <patterns>         Protection patterns (wildcards supported)
   -b, --backup                     Create backup (default: true)
   --no-backup                      Disable backup
   --backup-path <path>             Custom backup directory (default: ./backups)
   -c, --config <path>              Configuration file path
   -v, --verbose                    Enable verbose logging
+  --log-path <path>                Custom log directory path (default: ./logs)
   --proxmox-host <host>            Proxmox host address
   --proxmox-token <token>          Proxmox API token
   --older-than <duration>          Only remove resources older than this (e.g. 7d, 12h)
@@ -242,7 +266,7 @@ Preview what would be removed without making changes.
 proxmox-cleanup dry-run [options]
 
 Options:
-  -t, --types <types>              Resource types to scan (containers,images,volumes,networks)
+  -t, --types <types>              Resource types to scan, or all (containers,images,volumes,networks,all)
   -p, --protect <patterns>         Protection patterns (wildcards supported)
   -c, --config <path>              Path to configuration file
   -v, --verbose                    Enable verbose logging
@@ -261,7 +285,7 @@ List unused Docker resources without removing them. Results are grouped by type 
 proxmox-cleanup list [options]
 
 Options:
-  -t, --types <types>              Resource types to list (containers,images,volumes,networks)
+  -t, --types <types>              Resource types to list, or all (containers,images,volumes,networks,all)
   -p, --protect <patterns>         Protection patterns (wildcards supported)
   -c, --config <path>              Path to configuration file
   --older-than <duration>          Only list resources older than this (e.g. 7d, 12h)
@@ -343,13 +367,14 @@ proxmox-cleanup/
 
 ### Testing
 
-192 tests. Property-based testing with `fast-check` (100+ random inputs per property) covering resource identification, safe removal guarantees, backup completeness, size calculation accuracy, and report consistency, alongside unit tests for the clients, scanner, orchestrator, reporter, and backup manager. All seven Docker container states are covered, and a state the tool doesn't recognise is treated as not removable.
+208 tests. Property-based testing with `fast-check` (100+ random inputs per property) covering resource identification, safe removal guarantees, backup completeness, size calculation accuracy, and report consistency, alongside unit tests for the clients, scanner, orchestrator, reporter, and backup manager. All seven Docker container states are covered, and a state the tool doesn't recognise is treated as not removable.
 
 ```bash
 npm test              # Run the full suite
 npm run test:coverage # Run with coverage
 npm run build         # Build
 npm run lint          # Linting
+npm run smoke         # Verify the packaged tarball actually installs and runs
 ```
 
 ---

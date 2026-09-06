@@ -11,9 +11,6 @@ import https from 'https';
  */
 const API_TOKEN_PATTERN = /^[^:!]+@[^:!]+![^:]+:.+$/;
 
-/**
- * Proxmox API client implementation
- */
 export class ProxmoxClient implements IProxmoxClient {
   private config: ProxmoxConfig;
   private apiClient!: AxiosInstance;
@@ -27,10 +24,6 @@ export class ProxmoxClient implements IProxmoxClient {
     this.setupApiClient();
   }
 
-  /**
-   * Validate token format. Accepts either an API token
-   * (user@realm!tokenid:secret) or a legacy user@realm:password.
-   */
   private validateToken(token: string): void {
     if (API_TOKEN_PATTERN.test(token)) return;
     if (token.includes('@') && token.includes(':')) return;
@@ -39,9 +32,6 @@ export class ProxmoxClient implements IProxmoxClient {
     );
   }
 
-  /**
-   * Authenticate with Proxmox API
-   */
   async authenticate(): Promise<void> {
     try {
       if (API_TOKEN_PATTERN.test(this.config.token)) {
@@ -81,22 +71,18 @@ export class ProxmoxClient implements IProxmoxClient {
     }
   }
 
-  /**
-   * Check if client is authenticated
-   */
   isAuthenticated(): boolean {
     return this.authenticated;
   }
 
-  /**
-   * Setup axios client with SSL configuration
-   */
   private setupApiClient(): void {
     this.apiClient = axios.create({
       baseURL: `https://${this.config.host}:8006/api2/json`,
       timeout: 30000,
       httpsAgent: new https.Agent({
-        rejectUnauthorized: false // Accept self-signed certificates
+        // Proxmox ships a self-signed certificate by default; verification is
+        // opt-in via config.proxmox.verifyTls for anyone who's replaced it.
+        rejectUnauthorized: this.config.verifyTls === true
       }),
       headers: {
         'Content-Type': 'application/json'
@@ -119,18 +105,12 @@ export class ProxmoxClient implements IProxmoxClient {
     );
   }
 
-  /**
-   * Split a string on the first occurrence of `sep`
-   */
   private splitOnce(value: string, sep: string): [string, string] {
     const idx = value.indexOf(sep);
     if (idx < 0) return [value, ''];
     return [value.slice(0, idx), value.slice(idx + sep.length)];
   }
 
-  /**
-   * Create a standardized error object
-   */
   private createError(type: CleanupError['type'], message: string, originalError?: unknown): CleanupError {
     let errorMessage = message;
 

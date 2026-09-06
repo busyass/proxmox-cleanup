@@ -300,6 +300,43 @@ describe('Reporter Property Tests', () => {
       expect(summary).not.toContain('Success Rate');
       expect(summary).toContain('SKIPPED RESOURCES (left alone on purpose):');
     });
+
+    // diskSpaceFreed is a lower bound whenever a volume or network was
+    // removed — the Docker Engine doesn't report their size.
+    it('discloses that Disk Space Freed is a lower bound when a volume was removed', async () => {
+      const result: CleanupResult = {
+        removed: [
+          { id: '1', name: 'container1', type: 'container', size: 1000, createdAt: new Date(), tags: [] } as Resource,
+          { id: '2', name: 'vol1', type: 'volume', size: 0, createdAt: new Date(), tags: [] } as Resource
+        ],
+        skipped: [],
+        errors: [],
+        diskSpaceFreed: 1000,
+        executionTime: 1000
+      };
+
+      const report = reporter.generateReport('cleanup', [], result, 1000);
+      const summary = reporter.generateSummary(report);
+
+      expect(summary).toContain('aren\'t reported by the Docker Engine');
+    });
+
+    it('does not show the lower-bound note when every removed resource has a known size', async () => {
+      const result: CleanupResult = {
+        removed: [
+          { id: '1', name: 'container1', type: 'container', size: 1000, createdAt: new Date(), tags: [] } as Resource
+        ],
+        skipped: [],
+        errors: [],
+        diskSpaceFreed: 1000,
+        executionTime: 1000
+      };
+
+      const report = reporter.generateReport('cleanup', [], result, 1000);
+      const summary = reporter.generateSummary(report);
+
+      expect(summary).not.toContain('aren\'t reported by the Docker Engine');
+    });
   });
 
   describe('File Operations', () => {

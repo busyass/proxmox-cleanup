@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-09-06
+
+A protection-pattern bug is fixed: `-p` used to replace your config file's
+patterns outright rather than adding to them, so a one-off `-p` on the command
+line could silently drop cover on everything your config already protected.
+
+Major version because that changes what `-p` does when combined with a config
+file. Nothing else in this release needs re-configuring — the rest is two new
+opt-in security options and a couple of honesty fixes in the report output.
+
+### ⚠️ Breaking Changes
+
+- **`-p`/`--protect` adds to your config file's protection patterns, it no longer replaces them.** If you passed `-p` alongside a config file that already set `protectedPatterns`, the config's patterns were silently dropped for that run. See the bug fix below for the full story.
+
+### Security
+
+- **`--proxmox-token` can now come from a `PROXMOX_TOKEN` environment variable.** The flag still works, but it leaves the token in your shell history and in `ps` output for anyone else on the box. Set the environment variable instead, or keep the token in `config.json`.
+- **Proxmox's TLS certificate can now be verified.** The tool has always accepted it unchecked, since Proxmox ships a self-signed one by default — that stays the default. If you've replaced it with a certificate from a real CA, set `"verifyTls": true` under `proxmox` in `config.json` to have `validate-config` check it.
+
+### Bug Fixes
+
+- **Fixed `-p`/`--protect` replacing your config file's protection patterns instead of adding to them.** A config with `protectedPatterns: ["production-*"]` plus a one-off `cleanup -p "test-*"` used to run with only `test-*` protected — `production-*` went into the removal candidates with no warning. `-p` now widens the protected set instead of overwriting it.
+
+### Improvements
+
+- **"Disk Space Freed" now says when it's a minimum.** Docker doesn't report a size for volumes or networks, so removing them always added 0 to the total even though real space was freed. The report now adds a note when that happened, the same one `list` already shows for its own total.
+- **`--proxmox-token`'s own `--help` text now mentions both accepted formats.** It only ever documented the legacy `user@realm:password`, even though the newer API-token form, `user@realm!tokenid:secret`, has been accepted since it was added. The README had the same gap.
+
+### Under the hood
+
+- The `recoverable` flag on an error is now classified in one place instead of three, so a Docker-sourced error's recoverable/not-recoverable classification can't drift between the two paths that compute it.
+- Dev-tooling dependencies bumped to clear two advisories in the coverage tooling (`browserslist`, `js-yaml`). Neither ships in the package; `npm audit` was already 0 vulnerabilities for production dependencies.
+
 ## [2.0.0] - 2026-08-01
 
 Two ways cleanup could delete something it shouldn't are fixed, along with

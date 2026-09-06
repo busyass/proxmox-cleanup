@@ -1,7 +1,3 @@
-/**
- * Core type definitions for Proxmox Cleanup System
- */
-
 // Resource Types
 export type ResourceType = 'container' | 'image' | 'volume' | 'network';
 
@@ -61,6 +57,8 @@ export interface NetworkResource extends Resource {
 export interface ProxmoxConfig {
   host: string;
   token: string;
+  /** Verify Proxmox's TLS certificate. Off by default — Proxmox ships a self-signed one. */
+  verifyTls?: boolean;
 }
 
 export interface CleanupOptions {

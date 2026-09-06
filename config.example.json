@@ -1,7 +1,8 @@
 {
   "proxmox": {
     "host": "proxmox.example.com",
-    "token": "root@pam:your-api-token-here"
+    "token": "root@pam:your-api-token-here",
+    "verifyTls": false
   },
   "cleanup": {
     "dryRun": false,

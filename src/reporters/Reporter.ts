@@ -13,9 +13,6 @@ const DEFAULT_KEEP_REPORTS = 30;
 const REPORT_PREFIX = 'cleanup-report-';
 const SUMMARY_PREFIX = 'cleanup-summary-';
 
-/**
- * Reporter for generating cleanup summaries and logs
- */
 export class Reporter {
   private logger!: winston.Logger;
   private logPath: string;
@@ -33,9 +30,6 @@ export class Reporter {
     this.setupLogger();
   }
 
-  /**
-   * Generate a comprehensive cleanup report
-   */
   generateReport(
     mode: 'dry-run' | 'cleanup',
     scannedResources: Resource[],
@@ -59,15 +53,11 @@ export class Reporter {
       }
     };
 
-    // Log the report
     this.logReport(report);
 
     return report;
   }
 
-  /**
-   * Generate summary statistics
-   */
   generateSummary(report: Report): string {
     const { summary, details } = report;
     const lines: string[] = [];
@@ -76,15 +66,16 @@ export class Reporter {
     lines.push(`Timestamp: ${report.timestamp.toISOString()}`);
     lines.push('');
 
-    // Summary section
     lines.push('SUMMARY:');
     lines.push(`  Resources Scanned: ${summary.resourcesScanned}`);
     lines.push(`  Resources ${report.mode === 'dry-run' ? 'Would Be ' : ''}Removed: ${summary.resourcesRemoved}`);
     lines.push(`  Disk Space ${report.mode === 'dry-run' ? 'Would Be ' : ''}Freed: ${SizeCalculator.formatBytes(summary.diskSpaceFreed)}`);
+    if (details.removed.some(r => !SizeCalculator.hasKnownSize(r))) {
+      lines.push('  (at least this much — volume and network sizes aren\'t reported by the Docker Engine)');
+    }
     lines.push(`  Execution Time: ${(summary.executionTime / 1000).toFixed(2)}s`);
     lines.push('');
 
-    // Resource breakdown
     const resourceCounts = this.getResourceCounts(details.removed);
     if (Object.keys(resourceCounts).length > 0) {
       lines.push('RESOURCE BREAKDOWN:');
@@ -94,7 +85,6 @@ export class Reporter {
       lines.push('');
     }
 
-    // Skipped resources
     if (details.skipped.length > 0) {
       lines.push('SKIPPED RESOURCES (left alone on purpose):');
       details.skipped.forEach(resource => {
@@ -103,7 +93,6 @@ export class Reporter {
       lines.push('');
     }
 
-    // Errors
     if (details.errors.length > 0) {
       lines.push('ERRORS:');
       details.errors.forEach(error => {
@@ -115,7 +104,6 @@ export class Reporter {
       lines.push('');
     }
 
-    // Skipped unknown age
     if (details.skippedUnknownAge && details.skippedUnknownAge.length > 0) {
       lines.push('SKIPPED (creation time unavailable from the Docker Engine, --older-than could not apply):');
       details.skippedUnknownAge.forEach(resource => {
@@ -134,14 +122,9 @@ export class Reporter {
     return lines.join('\n');
   }
 
-  /**
-   * Save report to file
-   */
   async saveReport(report: Report, filename?: string): Promise<string> {
-    // Ensure log directory exists
     await this.ensureLogDirectory();
 
-    // Generate filename if not provided
     if (!filename) {
       filename = `${REPORT_PREFIX}${report.mode}-${isoSlug(report.timestamp)}.json`;
     }
@@ -161,14 +144,9 @@ export class Reporter {
     }
   }
 
-  /**
-   * Save summary to file
-   */
   async saveSummary(report: Report, filename?: string): Promise<string> {
-    // Ensure log directory exists
     await this.ensureLogDirectory();
 
-    // Generate filename if not provided
     if (!filename) {
       filename = `${SUMMARY_PREFIX}${report.mode}-${isoSlug(report.timestamp)}.txt`;
     }
@@ -188,9 +166,6 @@ export class Reporter {
     }
   }
 
-  /**
-   * Log cleanup operation start
-   */
   logOperationStart(mode: 'dry-run' | 'cleanup', resourceCount: number): void {
     this.logger.info(`Starting ${mode} operation`, {
       mode,
@@ -199,9 +174,6 @@ export class Reporter {
     });
   }
 
-  /**
-   * Log cleanup operation completion
-   */
   logOperationComplete(report: Report): void {
     this.logger.info(`${report.mode} operation completed`, {
       mode: report.mode,
@@ -214,10 +186,7 @@ export class Reporter {
     });
   }
 
-  /**
-   * Log resource removal. `dryRun` keeps the log honest: nothing was removed,
-   * so it must not say it was.
-   */
+  /** `dryRun` keeps the log honest: nothing was removed, so it must not say it was. */
   logResourceRemoval(resource: Resource, success: boolean, error?: string, dryRun = false): void {
     if (success) {
       const action = dryRun ? 'Would remove' : 'Removed';
@@ -239,9 +208,6 @@ export class Reporter {
     }
   }
 
-  /**
-   * Log resource skip
-   */
   logResourceSkip(resource: Resource, reason: string): void {
     this.logger.warn(`Skipped ${resource.type}: ${resource.name}`, {
       resourceType: resource.type,
@@ -252,9 +218,6 @@ export class Reporter {
     });
   }
 
-  /**
-   * Log backup operation
-   */
   logBackupOperation(resourceCount: number, backupPath: string, success: boolean, error?: string): void {
     if (success) {
       this.logger.info('Backup created successfully', {
@@ -272,18 +235,11 @@ export class Reporter {
     }
   }
 
-  /**
-   * Get logger instance for external use
-   */
   getLogger(): winston.Logger {
     return this.logger;
   }
 
-  /**
-   * Setup Winston logger with file and console transports
-   */
   private setupLogger(): void {
-    // Ensure log directory exists
     this.ensureLogDirectorySync();
 
     const logFormat = winston.format.combine(
@@ -301,14 +257,12 @@ export class Reporter {
       level: 'info',
       format: logFormat,
       transports: [
-        // File transport for all logs
         new winston.transports.File({
           filename: path.join(this.logPath, 'cleanup.log'),
           maxsize: 10 * 1024 * 1024, // 10MB
           maxFiles: 5,
           tailable: true
         }),
-        // File transport for errors only
         new winston.transports.File({
           filename: path.join(this.logPath, 'cleanup-error.log'),
           level: 'error',
@@ -316,7 +270,6 @@ export class Reporter {
           maxFiles: 5,
           tailable: true
         }),
-        // Console transport
         new winston.transports.Console({
           format: consoleFormat,
           level: process.env.NODE_ENV === 'test' ? 'error' : 'info',
@@ -326,9 +279,6 @@ export class Reporter {
     });
   }
 
-  /**
-   * Log the full report
-   */
   private logReport(report: Report): void {
     this.logger.info('Cleanup report generated', {
       mode: report.mode,
@@ -339,9 +289,6 @@ export class Reporter {
     });
   }
 
-  /**
-   * Get resource counts by type
-   */
   private getResourceCounts(resources: Resource[]): Record<string, number> {
     const counts: Record<string, number> = {};
 
@@ -364,16 +311,10 @@ export class Reporter {
     }
   }
 
-  /**
-   * Ensure log directory exists (async)
-   */
   private async ensureLogDirectory(): Promise<void> {
     await fs.promises.mkdir(this.logPath, { recursive: true });
   }
 
-  /**
-   * Ensure log directory exists (sync)
-   */
   private ensureLogDirectorySync(): void {
     fs.mkdirSync(this.logPath, { recursive: true });
   }

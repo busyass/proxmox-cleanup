@@ -15,15 +15,12 @@ import {
 } from '../interfaces';
 import { SizeCalculator } from '../utils/SizeCalculator';
 import { AgeFilter } from '../utils/AgeFilter';
-import { errorMessage } from '../utils/errors';
+import { errorMessage, isRecoverableDockerErrorType } from '../utils/errors';
 
 /** Shown when the Engine reports no creation time. */
 const UNKNOWN_AGE_REASON =
   'creation time unavailable from the Docker Engine — cannot apply --older-than';
 
-/**
- * Main orchestrator that coordinates the cleanup workflow
- */
 export class CleanupOrchestrator implements ICleanupOrchestrator {
   private dockerClient: IDockerClient;
   private resourceScanner: IResourceScanner;
@@ -53,9 +50,6 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     return minAge ? AgeFilter.parseDuration(minAge) : undefined;
   }
 
-  /**
-   * Execute the complete cleanup workflow
-   */
   async executeCleanup(): Promise<Report> {
     const startTime = Date.now();
     const mode = this.config.cleanup.dryRun ? 'dry-run' : 'cleanup';
@@ -122,9 +116,6 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     }
   }
 
-  /**
-   * Execute dry-run workflow
-   */
   async executeDryRun(): Promise<Report> {
     const originalDryRun = this.config.cleanup.dryRun;
     this.config.cleanup.dryRun = true;
@@ -138,16 +129,10 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     }
   }
 
-  /**
-   * Get cleanup configuration
-   */
   getConfig(): CleanupConfig {
     return { ...this.config };
   }
 
-  /**
-   * Update cleanup configuration
-   */
   updateConfig(newConfig: Partial<CleanupConfig>): void {
     this.config = { ...this.config, ...newConfig };
 
@@ -156,18 +141,12 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     }
   }
 
-  /**
-   * Connect to Docker daemon
-   */
   private async connectToDocker(): Promise<void> {
     if (!this.dockerClient.isConnected()) {
       await this.dockerClient.connect();
     }
   }
 
-  /**
-   * Scan every resource type and return them as a single flat list.
-   */
   private async scanAll(): Promise<Resource[]> {
     const [containers, images, volumes, networks] = await Promise.all([
       this.resourceScanner.scanContainers(),
@@ -208,10 +187,7 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     };
   }
 
-  /**
-   * List unused resources without removing anything. Returns the unknown-age
-   * set alongside the candidates so callers can surface that count too.
-   */
+  /** Returns the unknown-age set alongside the candidates so callers can surface that count too. */
   async listUnused(): Promise<UnusedResources> {
     const thresholdMs = this.minAgeMs();
     await this.connectToDocker();
@@ -219,9 +195,6 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     return this.selectCandidates(allResources, thresholdMs);
   }
 
-  /**
-   * Filter resources by type
-   */
   private filterResources(resources: Resource[]): Resource[] {
     const { resourceTypes } = this.config.cleanup;
     if (resourceTypes.length > 0) {
@@ -230,9 +203,6 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     return resources;
   }
 
-  /**
-   * Create backup of resources
-   */
   private async createBackup(resources: Resource[]): Promise<void> {
     try {
       const backupResult = await this.backupManager.createBackup(resources);
@@ -257,7 +227,6 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
     }
   }
 
-  /** Run the cleanup or dry-run and log each outcome. */
   private async performCleanup(resources: Resource[]): Promise<CleanupResult> {
     const result = await this.resourceScanner.performCleanup(resources);
 
@@ -272,7 +241,7 @@ export class CleanupOrchestrator implements ICleanupOrchestrator {
       type: e.type,
       message: e.error,
       timestamp: new Date(),
-      recoverable: e.type === 'network' || e.type === 'resource_not_found',
+      recoverable: isRecoverableDockerErrorType(e.type),
       resource: e.resource
     }));
     errors.forEach(e => {

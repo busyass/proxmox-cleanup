@@ -8,7 +8,7 @@ import {
   CleanupError
 } from '../types';
 import { IDockerClient } from '../interfaces';
-import { CleanupOperationError } from '../utils/errors';
+import { CleanupOperationError, isRecoverableDockerErrorType } from '../utils/errors';
 
 /**
  * Flatten labels to the tags protection patterns match against: both the bare
@@ -38,9 +38,6 @@ const CONTAINER_STATUS_BY_STATE: Record<string, ContainerStatus> = {
   dead: 'dead'
 };
 
-/**
- * Docker API client implementation
- */
 export class DockerClient implements IDockerClient {
   private docker: Docker;
   private connected: boolean = false;
@@ -53,9 +50,6 @@ export class DockerClient implements IDockerClient {
     });
   }
 
-  /**
-   * Test connection to Docker daemon
-   */
   async connect(): Promise<void> {
     try {
       await this.docker.ping();
@@ -67,9 +61,6 @@ export class DockerClient implements IDockerClient {
     }
   }
 
-  /**
-   * Check if connected to Docker daemon
-   */
   isConnected(): boolean {
     return this.connected;
   }
@@ -130,9 +121,6 @@ export class DockerClient implements IDockerClient {
     });
   }
 
-  /**
-   * List all volumes
-   */
   async listVolumes(): Promise<VolumeResource[]> {
     return this.listResources('volumes', async () => {
       const result = await this.docker.listVolumes();
@@ -195,18 +183,12 @@ export class DockerClient implements IDockerClient {
     );
   }
 
-  /**
-   * Remove a volume by name
-   */
   async removeVolume(name: string): Promise<void> {
     return this.removeResource('Volume', name, () =>
       this.docker.getVolume(name).remove()
     );
   }
 
-  /**
-   * Remove a network by ID
-   */
   async removeNetwork(id: string): Promise<void> {
     return this.removeResource('Network', id, () =>
       this.docker.getNetwork(id).remove()
@@ -268,14 +250,12 @@ export class DockerClient implements IDockerClient {
     return CONTAINER_STATUS_BY_STATE[state?.toLowerCase()] ?? 'unknown';
   }
 
-  /** Guard against operating on an unconnected client. */
   private ensureConnected(): void {
     if (!this.connected) {
       throw new Error('Docker client is not connected. Call connect() first.');
     }
   }
 
-  /** Typed error carrying its classification to the caller. */
   private operationError(
     type: CleanupError['type'],
     message: string,
@@ -285,14 +265,13 @@ export class DockerClient implements IDockerClient {
     return new CleanupOperationError(type, cleanupError.message, cleanupError.recoverable);
   }
 
-  /** Build the standard error shape. */
   private createError(type: CleanupError['type'], message: string, originalError?: unknown): CleanupError {
     const detail = originalError instanceof Error ? originalError.message.trim() : 'Unknown error';
     return {
       type,
       message: `${message}: ${detail}`,
       timestamp: new Date(),
-      recoverable: type === 'network' || type === 'resource_not_found'
+      recoverable: isRecoverableDockerErrorType(type)
     };
   }
 }

@@ -23,7 +23,7 @@ export function errorType(error: unknown): ErrorType {
   return error instanceof CleanupOperationError ? error.type : 'unknown';
 }
 
-/** Unclassified values are treated as non-recoverable. */
-export function isRecoverable(error: unknown): boolean {
-  return error instanceof CleanupOperationError ? error.recoverable : false;
+/** Shared by DockerClient and CleanupOrchestrator so their classification can't drift apart. */
+export function isRecoverableDockerErrorType(type: ErrorType): boolean {
+  return type === 'network' || type === 'resource_not_found';
 }

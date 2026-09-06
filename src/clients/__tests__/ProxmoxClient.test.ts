@@ -216,4 +216,31 @@ describe('ProxmoxClient', () => {
       );
     });
   });
+
+  describe('TLS verification', () => {
+    // Proxmox ships a self-signed certificate by default, so verification is
+    // opt-in — the default must stay off or every default install breaks.
+    it('does not verify the certificate by default', () => {
+      const call = mockedAxios.create.mock.calls[0][0] as any;
+      expect(call.httpsAgent.options.rejectUnauthorized).toBe(false);
+    });
+
+    it('does not verify when verifyTls is explicitly false', () => {
+      jest.clearAllMocks();
+      mockedAxios.create.mockReturnValue(mockAxiosInstance);
+      new ProxmoxClient({ ...mockConfig, verifyTls: false });
+
+      const call = mockedAxios.create.mock.calls[0][0] as any;
+      expect(call.httpsAgent.options.rejectUnauthorized).toBe(false);
+    });
+
+    it('verifies the certificate when verifyTls is true', () => {
+      jest.clearAllMocks();
+      mockedAxios.create.mockReturnValue(mockAxiosInstance);
+      new ProxmoxClient({ ...mockConfig, verifyTls: true });
+
+      const call = mockedAxios.create.mock.calls[0][0] as any;
+      expect(call.httpsAgent.options.rejectUnauthorized).toBe(true);
+    });
+  });
 });
