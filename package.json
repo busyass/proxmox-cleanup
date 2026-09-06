@@ -33,7 +33,7 @@
   "author": "Joe Yiu",
   "license": "MIT",
   "dependencies": {
-    "axios": "^1.19.0",
+    "axios": "^1.20.0",
     "commander": "^11.1.0",
     "dockerode": "^5.0.0",
     "winston": "^3.19.0"
